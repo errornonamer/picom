@@ -2,6 +2,10 @@
 
 ![picom.png](https://github.com/ibhagwan/picom/raw/next/picom.png)
 
+
+https://user-images.githubusercontent.com/77824120/143892481-c1be9ac9-44e0-4d1a-b20c-af261514b03b.mp4
+
+
 ## Why another picom fork?
 
 **TL;DR:** rounded corners, dual_kawase blur and window animations on all backends.
