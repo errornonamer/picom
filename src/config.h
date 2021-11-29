@@ -47,6 +47,7 @@ typedef struct win_option_mask {
 	bool opacity : 1;
 	bool corner_radius : 1;
 	bool round_borders : 1;
+	bool clip_shadow_above : 1;
 } win_option_mask_t;
 
 typedef struct win_option {
@@ -59,6 +60,7 @@ typedef struct win_option {
 	double opacity;
 	int corner_radius;
 	int round_borders;
+	bool clip_shadow_above;
 } win_option_t;
 
 enum blur_method {
@@ -77,6 +79,12 @@ typedef struct blur_strength {
 	int iterations;
 	float offset;
 } blur_strength_t;
+enum open_window_animation {
+	OPEN_WINDOW_ANIMATION_NONE = 0,
+	OPEN_WINDOW_ANIMATION_FLYIN,
+	OPEN_WINDOW_ANIMATION_ZOOM,
+	OPEN_WINDOW_ANIMATION_INVALID,
+};
 
 typedef struct _c2_lptr c2_lptr_t;
 
@@ -166,6 +174,8 @@ typedef struct options {
 	bool shadow_ignore_shaped;
 	/// Whether to crop shadow to the very Xinerama screen.
 	bool xinerama_shadow_crop;
+	/// Don't draw shadow over these windows. A linked list of conditions.
+	c2_lptr_t *shadow_clip_list;
 
 	// === Fading ===
 	/// How much to fade in in a single fading step.
@@ -180,6 +190,22 @@ typedef struct options {
 	bool no_fading_destroyed_argb;
 	/// Fading blacklist. A linked list of conditions.
 	c2_lptr_t *fade_blacklist;
+
+	// === Animations ===
+	/// Whether to do window animations
+	bool animations;
+	/// Which animation to run when opening a window
+	enum open_window_animation animation_for_open_window;
+	/// Spring stiffness for animation
+	double animation_stiffness;
+	/// Window mass for animation
+	double animation_window_mass;
+	/// Animation dampening
+	double animation_dampening;
+	/// Whether to clamp animations
+	bool animation_clamping;
+	/// TODO: window animation blacklist
+	/// TODO: open/close animations
 
 	// === Opacity ===
 	/// Default opacity for inactive windows.
@@ -275,6 +301,7 @@ bool must_use parse_geometry(session_t *, const char *, region_t *);
 bool must_use parse_rule_opacity(c2_lptr_t **, const char *);
 bool must_use parse_rule_border(c2_lptr_t **, const char *);
 enum blur_method must_use parse_blur_method(const char *src);
+enum open_window_animation must_use parse_open_window_animation(const char *src);
 
 /**
  * Add a pattern to a condition linked list.

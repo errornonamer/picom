@@ -542,7 +542,22 @@ void set_default_winopts(options_t *opt, win_option_mask_t *mask, bool shadow_en
         if (!mask[i].round_borders) {
             opt->wintype_option[i].round_borders = -1;
         }
+		if (!mask[i].clip_shadow_above) {
+			mask[i].clip_shadow_above = true;
+			opt->wintype_option[i].clip_shadow_above = false;
+		}
 	}
+}
+
+enum open_window_animation parse_open_window_animation(const char *src) {
+	if (strcmp(src, "none") == 0) {
+		return OPEN_WINDOW_ANIMATION_NONE;
+	} else if (strcmp(src, "fly-in") == 0) {
+		return OPEN_WINDOW_ANIMATION_FLYIN;
+	} else if (strcmp(src, "zoom") == 0) {
+		return OPEN_WINDOW_ANIMATION_ZOOM;
+	}
+	return OPEN_WINDOW_ANIMATION_INVALID;
 }
 
 char *parse_config(options_t *opt, const char *config_file, bool *shadow_enable,
@@ -579,6 +594,7 @@ char *parse_config(options_t *opt, const char *config_file, bool *shadow_enable,
 	    .shadow_blacklist = NULL,
 	    .shadow_ignore_shaped = false,
 	    .xinerama_shadow_crop = false,
+	    .shadow_clip_list = NULL,
 
 	    .corner_radius = 0,
 
@@ -588,6 +604,13 @@ char *parse_config(options_t *opt, const char *config_file, bool *shadow_enable,
 	    .no_fading_openclose = false,
 	    .no_fading_destroyed_argb = false,
 	    .fade_blacklist = NULL,
+
+	    .animations = false,
+	    .animation_for_open_window = OPEN_WINDOW_ANIMATION_NONE,
+	    .animation_stiffness = 200.0,
+	    .animation_window_mass = 1.0,
+	    .animation_dampening = 25,
+	    .animation_clamping = true,
 
 	    .inactive_opacity = 1.0,
 	    .inactive_opacity_override = false,

@@ -56,9 +56,9 @@ static void dummy_check_image(struct backend_base *base, const struct dummy_imag
 	assert(*tmp->refcount > 0);
 }
 
-void dummy_compose(struct backend_base *base, struct managed_win *w attr_unused, void *image, int dst_x attr_unused,
-                   int dst_y attr_unused, const region_t *reg_paint attr_unused,
-                   const region_t *reg_visible attr_unused) {
+void dummy_compose(struct backend_base *base, struct managed_win *w attr_unused, void *image, int dst_x1 attr_unused,
+                   int dst_y1 attr_unused, int dst_x2 attr_unused, int dst_y2 attr_unused,
+		   const region_t *reg_paint attr_unused, const region_t *reg_visible attr_unused) {
 	dummy_check_image(base, image);
 }
 
@@ -127,8 +127,14 @@ bool dummy_image_op(struct backend_base *base, enum image_operations op attr_unu
 	return true;
 }
 
-void *dummy_image_copy(struct backend_base *base, const void *image,
-                       const region_t *reg_visible attr_unused) {
+bool dummy_set_image_property(struct backend_base *base, enum image_properties prop attr_unused,
+                              void *image, void *arg attr_unused) {
+	dummy_check_image(base, image);
+	return true;
+}
+
+void *dummy_clone_image(struct backend_base *base, const void *image,
+                        const region_t *reg_visible attr_unused) {
 	auto img = (const struct dummy_image *)image;
 	dummy_check_image(base, img);
 	(*img->refcount)++;
@@ -179,7 +185,8 @@ struct backend_operations dummy_ops = {
     .max_buffer_age = 5,
 
     .image_op = dummy_image_op,
-    .copy = dummy_image_copy,
+    .clone_image = dummy_clone_image,
+    .set_image_property = dummy_set_image_property,
     .create_blur_context = dummy_create_blur_context,
     .destroy_blur_context = dummy_destroy_blur_context,
     .create_round_context = dummy_create_round_context,

@@ -71,6 +71,24 @@ static void usage(const char *argv0, int ret) {
 	    "-F\n"
 	    "  Equals to -f. Deprecated.\n"
 	    "\n"
+	    "--animations\n"
+	    "  Run animations for window geometry changes (movement and scaling).\n"
+	    "\n"
+	    "--animation-for-open-window\n"
+	    "  Which animation to run when opening a window. Must be one of `none`, `fly-in` (default: none).\n"
+	    "\n"
+	    "--animation-stiffness\n"
+	    "  Stiffness (a.k.a. tension) parameter for animation (default: 200.0).\n"
+	    "\n"
+	    "--animation-dampening\n"
+	    "  Dampening (a.k.a. friction) parameter for animation (default: 25.0).\n"
+	    "\n"
+	    "--animation-window-mass\n"
+	    "  Mass parameter for animation (default: 1.0).\n"
+	    "\n"
+	    "--animation-clamping\n"
+	    "  Whether to clamp animations (default: true)\n"
+	    "\n"
 	    "-i opacity\n"
 	    "  Opacity of inactive windows. (0.1 - 1.0)\n"
 	    "\n"
@@ -290,6 +308,10 @@ static void usage(const char *argv0, int ret) {
 	    "  Use --shadow-exclude-reg \'x10+0-0\', for example, if the 10 pixels\n"
 	    "  on the bottom of the screen should not have shadows painted on.\n"
 	    "\n"
+	    "--clip-shadow-above condition\n"
+	    "  Specify a list of conditions of windows to not paint a shadow over,\n"
+	    "  such as a dock window.\n"
+	    "\n"
 	    "--xinerama-shadow-crop\n"
 	    "  Crop shadow of a window fully on a particular Xinerama screen to the\n"
 	    "  screen.\n"
@@ -459,11 +481,18 @@ static const struct option longopts[] = {
     {"round-borders", required_argument, NULL, 342},
     {"round-borders-exclude", required_argument, NULL, 343},
     {"round-borders-rule", required_argument, NULL, 344},
+	{"clip-shadow-above", required_argument, NULL, 345},
     {"experimental-backends", no_argument, NULL, 733},
     {"monitor-repaint", no_argument, NULL, 800},
     {"diagnostics", no_argument, NULL, 801},
     {"debug-mode", no_argument, NULL, 802},
     {"no-ewmh-fullscreen", no_argument, NULL, 803},
+    {"animations", no_argument, NULL, 804},
+    {"animation-stiffness", required_argument, NULL, 805},
+    {"animation-dampening", required_argument, NULL, 806},
+    {"animation-window-mass", required_argument, NULL, 807},
+    {"animation-clamping", no_argument, NULL, 808},
+    {"animation-for-open-window", required_argument, NULL, 809},
     // Must terminate with a NULL entry
     {NULL, 0, NULL, 0},
 };
@@ -803,7 +832,7 @@ bool get_cfg(options_t *opt, int argc, char *const *argv, bool shadow_enable,
 			free(opt->shadow_exclude_reg_str);
 			opt->shadow_exclude_reg_str = strdup(optarg);
 			log_warn("--shadow-exclude-reg is deprecated. You are likely "
-			         "better off using --shadow-exclude anyway");
+			         "better off using --clip-shadow-above anyway");
 			break;
 		case 306:
 			// --paint-exclude
@@ -895,11 +924,42 @@ bool get_cfg(options_t *opt, int argc, char *const *argv, bool shadow_enable,
 			// --rounded-corners-exclude
 			condlst_add(&opt->rounded_corners_blacklist, optarg);
 			break;
+		case 335:
+			// --clip-shadow-above
+			condlst_add(&opt->shadow_clip_list, optarg);
+			break;
 		P_CASEBOOL(733, experimental_backends);
 		P_CASEBOOL(800, monitor_repaint);
 		case 801: opt->print_diagnostics = true; break;
 		P_CASEBOOL(802, debug_mode);
 		P_CASEBOOL(803, no_ewmh_fullscreen);
+		P_CASEBOOL(804, animations);
+		case 805:
+			// --animation-stiffness
+			opt->animation_stiffness = atof(optarg);
+			break;
+		case 806:
+			// --animation-dampening
+			opt->animation_dampening = atof(optarg);
+			break;
+		case 807:
+			// --animation-window-masss
+			opt->animation_window_mass = atof(optarg);
+			break;
+		case 808:
+			// --animation-clamping
+			opt->animation_clamping = true;
+			break;
+		case 809: {
+			// --animation-for-open-window
+			enum open_window_animation animation = parse_open_window_animation(optarg);
+			if (animation >= OPEN_WINDOW_ANIMATION_INVALID) {
+				log_warn("Invalid open-window animation %s, ignoring.", optarg);
+			} else {
+				opt->animation_for_open_window = animation;
+			}
+			break;
+		}
 		default: usage(argv[0], 1); break;
 #undef P_CASEBOOL
 		}

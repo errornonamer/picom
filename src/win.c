@@ -231,8 +231,8 @@ void win_get_region_noframe_local(const struct managed_win *w, region_t *res) {
 
 	int x = extents.left;
 	int y = extents.top;
-	int width = max2(w->g.width - (extents.left + extents.right), 0);
-	int height = max2(w->g.height - (extents.top + extents.bottom), 0);
+	int width = max2(w->widthb - (extents.left + extents.right), 0);
+	int height = max2(w->heightb - (extents.top + extents.bottom), 0);
 
 	pixman_region32_fini(res);
 	if (width > 0 && height > 0) {
@@ -246,8 +246,9 @@ gen_without_corners(win_get_region_noframe_local);
 
 void win_get_region_frame_local(const struct managed_win *w, region_t *res) {
 	const margin_t extents = win_calc_frame_extents(w);
-	auto outer_width = extents.left + extents.right + w->g.width;
-	auto outer_height = extents.top + extents.bottom + w->g.height;
+	auto outer_width = w->widthb;
+	auto outer_height = w->heightb;
+
 	pixman_region32_fini(res);
 	pixman_region32_init_rects(
 	    res,
@@ -300,6 +301,13 @@ static inline void win_release_pixmap(backend_t *base, struct managed_win *w) {
 		w->win_image = NULL;
 		// Bypassing win_set_flags, because `w` might have been destroyed
 		w->flags |= WIN_FLAGS_PIXMAP_NONE;
+	}
+}
+static inline void win_release_oldpixmap(backend_t *base, struct managed_win *w) {
+	log_debug("Releasing old_pixmap of window %#010x (%s)", w->base.id, w->name);
+	if (w->old_win_image) {
+		base->ops->release_image(base, w->old_win_image);
+		w->old_win_image = NULL;
 	}
 }
 static inline void win_release_shadow(backend_t *base, struct managed_win *w) {
@@ -366,6 +374,7 @@ void win_release_images(struct backend_base *backend, struct managed_win *w) {
 	if (!win_check_flags_all(w, WIN_FLAGS_PIXMAP_NONE)) {
 		assert(!win_check_flags_all(w, WIN_FLAGS_PIXMAP_STALE));
 		win_release_pixmap(backend, w);
+		win_release_oldpixmap(backend, w);
 	}
 
 	if (!win_check_flags_all(w, WIN_FLAGS_SHADOW_NONE)) {
@@ -429,6 +438,39 @@ static void win_update_properties(session_t *ps, struct managed_win *w) {
 	win_clear_all_properties_stale(w);
 }
 
+static void init_animation(session_t *ps, struct managed_win *w) {
+	switch (ps->o.animation_for_open_window) {
+	case OPEN_WINDOW_ANIMATION_NONE: { // No animation
+		w->animation_center_x = w->pending_g.x + w->pending_g.width * 0.5;
+		w->animation_center_y = w->pending_g.y + w->pending_g.height * 0.5;
+		w->animation_w = w->pending_g.width;
+		w->animation_h = w->pending_g.height;
+		break;
+	}
+	case OPEN_WINDOW_ANIMATION_FLYIN: { // Fly-in from a random point outside the screen
+		// Compute random point off screen
+		double angle = 2 * M_PI * ((double)rand() / RAND_MAX);
+		const double radius =
+		    sqrt(ps->root_width * ps->root_width + ps->root_height * ps->root_height);
+
+		// Set animation
+		w->animation_center_x = ps->root_width * 0.5 + radius * cos(angle);
+		w->animation_center_y = ps->root_height * 0.5 + radius * sin(angle);
+		w->animation_w = 0;
+		w->animation_h = 0;
+		break;
+	}
+	case OPEN_WINDOW_ANIMATION_ZOOM: { // Zoom-in the image, without changing its location
+		w->animation_center_x = w->pending_g.x + w->pending_g.width * 0.5;
+		w->animation_center_y = w->pending_g.y + w->pending_g.height * 0.5;
+		w->animation_w = 0;
+		w->animation_h = 0;
+		break;
+	}
+	case OPEN_WINDOW_ANIMATION_INVALID: assert(false); break;
+	}
+}
+
 /// Handle non-image flags. This phase might set IMAGES_STALE flags
 void win_process_update_flags(session_t *ps, struct managed_win *w) {
 	// Whether the window was visible before we process the mapped flag. i.e. is the
@@ -470,7 +512,49 @@ void win_process_update_flags(session_t *ps, struct managed_win *w) {
 		}
 
 		// Update window geometry
-		w->g = w->pending_g;
+		if (ps->o.animations) {
+			if (!was_visible) {
+				// Set window-open animation
+				init_animation(ps, w);
+				w->animation_dest_center_x = w->pending_g.x + w->pending_g.width * 0.5;
+				w->animation_dest_center_y = w->pending_g.y + w->pending_g.height * 0.5;
+				w->animation_dest_w = w->pending_g.width;
+				w->animation_dest_h = w->pending_g.height;
+
+				w->g.x = (int16_t)round(w->animation_center_x -
+				                        w->animation_w * 0.5);
+				w->g.y = (int16_t)round(w->animation_center_y -
+				                        w->animation_h * 0.5);
+				w->g.width = (uint16_t)round(w->animation_w);
+				w->g.height = (uint16_t)round(w->animation_h);
+			} else {
+				w->animation_dest_center_x =
+				    w->pending_g.x + w->pending_g.width * 0.5;
+				w->animation_dest_center_y =
+				    w->pending_g.y + w->pending_g.height * 0.5;
+				w->animation_dest_w = w->pending_g.width;
+				w->animation_dest_h = w->pending_g.height;
+			}
+
+			w->g.border_width = w->pending_g.border_width;
+
+			w->animation_progress = 0.0;
+			double x_dist = w->animation_dest_center_x - w->animation_center_x;
+			double y_dist = w->animation_dest_center_y - w->animation_center_y;
+			w->animation_inv_og_distance =
+			    1.0 / sqrt(x_dist * x_dist + y_dist * y_dist);
+
+			if (w->old_win_image) {
+				ps->backend_data->ops->release_image(ps->backend_data,
+				                                     w->old_win_image);
+				w->old_win_image = NULL;
+			}
+			if (w->win_image)
+				w->old_win_image = ps->backend_data->ops->clone_image(
+				    ps->backend_data, w->win_image, &w->bounding_shape);
+		} else {
+			w->g = w->pending_g;
+		}
 
 		if (win_check_flags_all(w, WIN_FLAGS_SIZE_STALE)) {
 			win_on_win_size_change(ps, w);
@@ -970,6 +1054,12 @@ void win_update_prop_shadow(session_t *ps, struct managed_win *w) {
 	}
 }
 
+static void win_determine_clip_shadow_above(session_t *ps, struct managed_win *w) {
+	bool should_crop = (ps->o.wintype_option[w->window_type].clip_shadow_above ||
+	                    c2_match(ps, w, ps->o.shadow_clip_list, NULL));
+	w->clip_shadow_above = should_crop;
+}
+
 static void win_set_invert_color(session_t *ps, struct managed_win *w, bool invert_color_new) {
 	if (w->invert_color == invert_color_new) {
 		return;
@@ -1156,6 +1246,7 @@ void win_on_factor_change(session_t *ps, struct managed_win *w) {
 	win_update_focused(ps, w);
 
 	win_determine_shadow(ps, w);
+	win_determine_clip_shadow_above(ps, w);
 	win_determine_invert_color(ps, w);
 	win_determine_blur_background(ps, w);
 	win_determine_rounded_corners(ps, w);
@@ -1452,13 +1543,19 @@ struct win *fill_win(session_t *ps, struct win *w) {
 	    .blur_background = false,
 	    .reg_ignore = NULL,
 	    // The following ones are updated for other reasons
-	    .pixmap_damaged = false,          // updated by damage events
-	    .state = WSTATE_UNMAPPED,         // updated by window state changes
-	    .in_openclose = true,             // set to false after first map is done,
-	                                      // true here because window is just created
-	    .reg_ignore_valid = false,        // set to true when damaged
-	    .flags = WIN_FLAGS_IMAGES_NONE,        // updated by property/attributes/etc
-	                                           // change
+	    .pixmap_damaged = false,         // updated by damage events
+	    .state = WSTATE_UNMAPPED,        // updated by window state changes
+	    .in_openclose = true,            // set to false after first map is done,
+	                                     // true here because window is just created
+	    .animation_velocity_x = 0.0,             // updated by window geometry changes
+	    .animation_velocity_y = 0.0,             // updated by window geometry changes
+	    .animation_velocity_w = 0.0,             // updated by window geometry changes
+	    .animation_velocity_h = 0.0,             // updated by window geometry changes
+	    .animation_progress = 1.0,               // updated by window geometry changes
+	    .animation_inv_og_distance = NAN,        // updated by window geometry changes
+	    .reg_ignore_valid = false,               // set to true when damaged
+	    .flags = WIN_FLAGS_IMAGES_NONE,          // updated by property/attributes/etc
+	                                             // change
 	    .stale_props = NULL,
 	    .stale_props_capacity = 0,
 
@@ -1484,9 +1581,11 @@ struct win *fill_win(session_t *ps, struct win *w) {
 	    // have no meaning or have no use until the window
 	    // is mapped
 	    .win_image = NULL,
+	    .old_win_image = NULL,
 	    .shadow_image = NULL,
 	    .prev_trans = NULL,
 	    .shadow = false,
+	    .clip_shadow_above = false,
 	    .xinerama_scr = -1,
 	    .mode = WMODE_TRANS,
 	    .ever_damaged = false,
@@ -2031,11 +2130,20 @@ static void unmap_win_finish(session_t *ps, struct managed_win *w) {
 		// Shadow image can be preserved.
 		if (!win_check_flags_all(w, WIN_FLAGS_PIXMAP_NONE)) {
 			win_release_pixmap(ps->backend_data, w);
+			win_release_oldpixmap(ps->backend_data, w);
 		}
 	} else {
 		assert(!w->win_image);
+		assert(!w->old_win_image);
 		assert(!w->shadow_image);
 	}
+
+	// Force animation to completed position
+	w->animation_velocity_x = 0;
+	w->animation_velocity_y = 0;
+	w->animation_velocity_w = 0;
+	w->animation_velocity_h = 0;
+	w->animation_progress = 1.0;
 
 	free_paint(ps, &w->paint);
 	free_paint(ps, &w->shadow_paint);

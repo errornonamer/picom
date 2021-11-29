@@ -58,8 +58,10 @@ typedef struct {
 	GLint color_loc;
 } gl_fill_shader_t;
 
+/// @brief Wrapper of a binded GLX texture.
 struct gl_texture {
 	int refcount;
+	bool has_alpha;
 	GLuint texture;
 	int width, height;
 	bool y_inverted;
@@ -68,17 +70,6 @@ struct gl_texture {
 	GLuint auxiliary_texture[2];
 	void *user_data;
 };
-
-/// @brief Wrapper of a binded GLX texture.
-typedef struct gl_image {
-	struct gl_texture *inner;
-	double opacity;
-	double dim;
-	double max_brightness;
-	int ewidth, eheight;
-	bool has_alpha;
-	bool color_inverted;
-} gl_image_t;
 
 struct gl_data {
 	backend_t base;
@@ -114,8 +105,9 @@ GLuint gl_create_program_from_str(const char *vert_shader_str, const char *frag_
 /**
  * @brief Render a region with texture data.
  */
-void gl_compose(backend_t *, struct managed_win *, void *ptex, int dst_x, int dst_y, const region_t *reg_tgt,
-                const region_t *reg_visible);
+void gl_compose(backend_t *, struct managed_win *, void *ptex,
+		int dst_x1, int dst_y1, int dst_x2, int dst_y2,
+		const region_t *reg_tgt, const region_t *reg_visible);
 
 void gl_resize(struct gl_data *, int width, int height);
 
@@ -129,7 +121,7 @@ bool gl_image_op(backend_t *base, enum image_operations op, void *image_data,
 
 void gl_release_image(backend_t *base, void *image_data);
 
-void *gl_copy(backend_t *base, const void *image_data, const region_t *reg_visible);
+void *gl_clone(backend_t *base, const void *image_data, const region_t *reg_visible);
 
 bool gl_blur(backend_t *base, double opacity, void *, const region_t *reg_blur,
              const region_t *reg_visible);
@@ -149,6 +141,7 @@ bool gl_is_image_transparent(backend_t *base, void *image_data);
 void gl_fill(backend_t *base, struct color, const region_t *clip);
 
 void gl_present(backend_t *base, const region_t *);
+bool gl_read_pixel(backend_t *base, void *image_data, int x, int y, struct color *output);
 
 static inline void gl_delete_texture(GLuint texture) {
 	glDeleteTextures(1, &texture);
@@ -167,6 +160,14 @@ static inline const char *gl_get_err_str(GLenum err) {
 		CASESTRRET(GL_OUT_OF_MEMORY);
 		CASESTRRET(GL_STACK_UNDERFLOW);
 		CASESTRRET(GL_STACK_OVERFLOW);
+		CASESTRRET(GL_FRAMEBUFFER_UNDEFINED);
+		CASESTRRET(GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT);
+		CASESTRRET(GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT);
+		CASESTRRET(GL_FRAMEBUFFER_INCOMPLETE_DRAW_BUFFER);
+		CASESTRRET(GL_FRAMEBUFFER_INCOMPLETE_READ_BUFFER);
+		CASESTRRET(GL_FRAMEBUFFER_UNSUPPORTED);
+		CASESTRRET(GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE);
+		CASESTRRET(GL_FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS);
 	}
 	return NULL;
 }
@@ -197,6 +198,30 @@ static inline void gl_clear_err(void) {
 }
 
 #define gl_check_err() gl_check_err_(__func__, __LINE__)
+
+/**
+ * Check for GL framebuffer completeness.
+ */
+static inline bool gl_check_fb_complete_(const char *func, int line, GLenum fb) {
+	GLenum status = glCheckFramebufferStatus(fb);
+
+	if (status == GL_FRAMEBUFFER_COMPLETE) {
+		return true;
+	}
+
+	const char *stattext = gl_get_err_str(status);
+	if (stattext) {
+		log_printf(tls_logger, LOG_LEVEL_ERROR, func,
+		           "Framebuffer attachment failed at line %d: %s", line, stattext);
+	} else {
+		log_printf(tls_logger, LOG_LEVEL_ERROR, func,
+		           "Framebuffer attachment failed at line %d: %d", line, status);
+	}
+
+	return false;
+}
+
+#define gl_check_fb_complete(fb) gl_check_fb_complete_(__func__, __LINE__, (fb))
 
 /**
  * Check if a GLX extension exists.

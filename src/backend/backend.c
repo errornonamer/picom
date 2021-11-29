@@ -53,6 +53,58 @@ region_t get_damage(session_t *ps, bool all_damage) {
 	return region;
 }
 
+static void process_window_for_painting(session_t *ps, struct managed_win* w, void* win_image,
+					double additional_alpha,
+					region_t* reg_bound, region_t* reg_visible,
+					region_t* reg_paint, region_t* reg_paint_in_bound) {
+	// For window image processing, we don't have to limit the process
+	// region to damage for correctness. (see <damager-note> for
+	// details)
+
+	// The visible region, in window local coordinates Although we
+	// don't limit process region to damage, we provide that info in
+	// reg_visible as a hint. Since window image data outside of the
+	// damage region won't be painted onto target
+	region_t reg_visible_local;
+	{
+		// The bounding shape, in window local coordinates
+		region_t reg_bound_local;
+		pixman_region32_init(&reg_bound_local);
+		pixman_region32_copy(&reg_bound_local, reg_bound);
+		pixman_region32_translate(&reg_bound_local, -w->g.x, -w->g.y);
+
+		pixman_region32_init(&reg_visible_local);
+		pixman_region32_intersect(&reg_visible_local,
+					  reg_visible, reg_paint);
+		pixman_region32_translate(&reg_visible_local, -w->g.x,
+					  -w->g.y);
+		// Data outside of the bounding shape won't be visible,
+		// but it is not necessary to limit the image operations
+		// to the bounding shape yet. So pass that as the visible
+		// region, not the clip region.
+		pixman_region32_intersect(
+		    &reg_visible_local, &reg_visible_local, &reg_bound_local);
+		pixman_region32_fini(&reg_bound_local);
+	}
+
+	auto new_img = ps->backend_data->ops->clone_image(
+	    ps->backend_data, win_image, &reg_visible_local);
+	auto reg_frame = win_get_region_frame_local_by_val(w);
+	double alpha = additional_alpha*w->opacity;
+	ps->backend_data->ops->set_image_property(
+	    ps->backend_data, IMAGE_PROPERTY_OPACITY, new_img, &alpha);
+	ps->backend_data->ops->image_op(
+	    ps->backend_data, IMAGE_OP_APPLY_ALPHA, new_img, &reg_frame,
+	    &reg_visible_local, (double[]){w->frame_opacity});
+	pixman_region32_fini(&reg_frame);
+	ps->backend_data->ops->compose(ps->backend_data, new_img,
+				       w->g.x, w->g.y,
+				       w->g.x + w->widthb, w->g.y + w->heightb,
+				       reg_paint_in_bound, reg_visible);
+	ps->backend_data->ops->release_image(ps->backend_data, new_img);
+	pixman_region32_fini(&reg_visible_local);
+}
+
 /// paint all windows
 void paint_all_new(session_t *ps, struct managed_win *t, bool ignore_damage) {
 	if (ps->o.xrender_sync_fence) {
@@ -144,12 +196,17 @@ void paint_all_new(session_t *ps, struct managed_win *t, bool ignore_damage) {
 		pixman_region32_subtract(&reg_visible, &reg_visible, t->reg_ignore);
 	}
 
+	// Region on screen we don't want any shadows on
+	region_t reg_shadow_clip;
+	pixman_region32_init(&reg_shadow_clip);
+
 	if (ps->backend_data->ops->prepare) {
 		ps->backend_data->ops->prepare(ps->backend_data, &reg_paint);
 	}
 
 	if (ps->root_image) {
-		ps->backend_data->ops->compose(ps->backend_data, t, ps->root_image, 0, 0,
+		ps->backend_data->ops->compose(ps->backend_data, t, ps->root_image,
+					       0, 0, ps->root_width, ps->root_height,
 		                               &reg_paint, &reg_visible);
 	} else {
 		ps->backend_data->ops->fill(ps->backend_data, (struct color){0, 0, 0, 1},
@@ -290,6 +347,10 @@ void paint_all_new(session_t *ps, struct managed_win *t, bool ignore_damage) {
 				pixman_region32_subtract(&reg_shadow, &reg_shadow,
 				                         &ps->shadow_exclude_reg);
 			}
+			if (pixman_region32_not_empty(&reg_shadow_clip)) {
+				pixman_region32_subtract(&reg_shadow, &reg_shadow,
+				                         &reg_shadow_clip);
+			}
 
 			if (ps->o.xinerama_shadow_crop && w->xinerama_scr >= 0 &&
 			    w->xinerama_scr < ps->xinerama_nscrs) {
@@ -314,115 +375,107 @@ void paint_all_new(session_t *ps, struct managed_win *t, bool ignore_damage) {
 			assert(w->shadow_image);
 			if (w->opacity == 1) {
 				ps->backend_data->ops->compose(
-				    ps->backend_data, w, w->shadow_image, w->g.x + w->shadow_dx,
-				    w->g.y + w->shadow_dy, &reg_shadow, &reg_visible);
+				    ps->backend_data, w, w->shadow_image,
+					w->g.x + w->shadow_dx, w->g.y + w->shadow_dy,
+			    	w->g.x + w->shadow_dx + w->shadow_width,
+			    	w->g.y + w->shadow_dy + w->shadow_height,
+					&reg_shadow, &reg_visible);
 			} else {
-				auto new_img = ps->backend_data->ops->copy(
-				    ps->backend_data, w->shadow_image, &reg_visible);
-				ps->backend_data->ops->image_op(
-				    ps->backend_data, IMAGE_OP_APPLY_ALPHA_ALL, new_img,
-				    NULL, &reg_visible, (double[]){w->opacity});
+				ps->backend_data->ops->set_image_property(
+			    	ps->backend_data, IMAGE_PROPERTY_OPACITY, w->shadow_image,
+			    	&w->opacity);
 				ps->backend_data->ops->compose(
-				    ps->backend_data, w, new_img, w->g.x + w->shadow_dx,
-				    w->g.y + w->shadow_dy, &reg_shadow, &reg_visible);
-				ps->backend_data->ops->release_image(ps->backend_data, new_img);
+				    ps->backend_data, w, w->shadow_image,
+					w->g.x + w->shadow_dx, w->g.y + w->shadow_dy, 
+			    	w->g.x + w->shadow_dx + w->shadow_width,
+			    	w->g.y + w->shadow_dy + w->shadow_height,
+					reg_shadow, &reg_visible);
 			}
+
 			pixman_region32_fini(&reg_shadow);
 		}
 
-		// Set max brightness
-		if (ps->o.max_brightness < 1.0) {
-			ps->backend_data->ops->image_op(
-			    ps->backend_data, IMAGE_OP_MAX_BRIGHTNESS, w->win_image, NULL,
-			    &reg_visible, &ps->o.max_brightness);
-		}
+		// Update image properties
+		{
+			double dim_opacity = 0.0;
 
-		// Draw window on target
-		if (!w->invert_color && !w->dim && w->frame_opacity == 1 && w->opacity == 1) {
-			ps->backend_data->ops->compose(ps->backend_data, w, w->win_image,
-			                               w->g.x, w->g.y,
-			                               &reg_paint_in_bound, &reg_visible);
-		} else if (w->opacity * MAX_ALPHA >= 1) {
-			// We don't need to paint the window body itself if it's
-			// completely transparent.
 
-			// For window image processing, we don't have to limit the process
-			// region to damage for correctness. (see <damager-note> for
-			// details)
-
-			// The bounding shape, in window local coordinates
-			region_t reg_bound_local;
-			pixman_region32_init(&reg_bound_local);
-			pixman_region32_copy(&reg_bound_local, &reg_bound);
-			pixman_region32_translate(&reg_bound_local, -w->g.x, -w->g.y);
-
-			// The visible region, in window local coordinates
-			// Although we don't limit process region to damage, we provide
-			// that info in reg_visible as a hint. Since window image data
-			// outside of the damage region won't be painted onto target
-			region_t reg_visible_local;
-			pixman_region32_init(&reg_visible_local);
-			pixman_region32_intersect(&reg_visible_local, &reg_visible, &reg_paint);
-			pixman_region32_translate(&reg_visible_local, -w->g.x, -w->g.y);
-			// Data outside of the bounding shape won't be visible, but it is
-			// not necessary to limit the image operations to the bounding
-			// shape yet. So pass that as the visible region, not the clip
-			// region.
-			pixman_region32_intersect(&reg_visible_local, &reg_visible_local,
-			                          &reg_bound_local);
-
-			auto new_img = ps->backend_data->ops->copy(
-			    ps->backend_data, w->win_image, &reg_visible_local);
-			if (w->invert_color) {
-				ps->backend_data->ops->image_op(
-				    ps->backend_data, IMAGE_OP_INVERT_COLOR_ALL, new_img,
-				    NULL, &reg_visible_local, NULL);
-			}
 			if (w->dim) {
-				double dim_opacity = ps->o.inactive_dim;
+				dim_opacity = ps->o.inactive_dim;
 				if (!ps->o.inactive_dim_fixed) {
 					dim_opacity *= w->opacity;
 				}
-				ps->backend_data->ops->image_op(
-				    ps->backend_data, IMAGE_OP_DIM_ALL, new_img, NULL,
-				    &reg_visible_local, (double[]){dim_opacity});
 			}
-			if (w->frame_opacity != 1) {
-				auto reg_frame = win_get_region_frame_local_by_val(w);
-				ps->backend_data->ops->image_op(
-				    ps->backend_data, IMAGE_OP_APPLY_ALPHA, new_img, &reg_frame,
-				    &reg_visible_local, (double[]){w->frame_opacity});
-				pixman_region32_fini(&reg_frame);
-			}
-			if (w->opacity != 1) {
-				ps->backend_data->ops->image_op(
-				    ps->backend_data, IMAGE_OP_APPLY_ALPHA_ALL, new_img,
-				    NULL, &reg_visible_local, (double[]){w->opacity});
-			}
-			ps->backend_data->ops->compose(ps->backend_data, w, new_img, w->g.x,
-			                               w->g.y, &reg_paint_in_bound,
-			                               &reg_visible);
-			ps->backend_data->ops->release_image(ps->backend_data, new_img);
-			pixman_region32_fini(&reg_visible_local);
-			pixman_region32_fini(&reg_bound_local);
+
+			ps->backend_data->ops->set_image_property(
+			    ps->backend_data, IMAGE_PROPERTY_MAX_BRIGHTNESS, w->win_image,
+			    &ps->o.max_brightness);
+			ps->backend_data->ops->set_image_property(
+			    ps->backend_data, IMAGE_PROPERTY_INVERTED, w->win_image,
+			    &w->invert_color);
+			ps->backend_data->ops->set_image_property(
+			    ps->backend_data, IMAGE_PROPERTY_DIM_LEVEL, w->win_image,
+			    &dim_opacity);
+			ps->backend_data->ops->set_image_property(
+			    ps->backend_data, IMAGE_PROPERTY_OPACITY, w->win_image, &w->opacity);
 		}
 
+		if (w->opacity * MAX_ALPHA < 1) {
+			// We don't need to paint the window body itself if it's
+			// completely transparent.
+			goto skip;
+		}
+
+		if (w->clip_shadow_above) {
+			// Add window bounds to shadow-clip region
+			pixman_region32_union(&reg_shadow_clip, &reg_shadow_clip, &reg_bound);
+		} else {
+			// Remove overlapping window bounds from shadow-clip region
+			pixman_region32_subtract(&reg_shadow_clip, &reg_shadow_clip, &reg_bound);
+		}
+
+		// Draw window on target
+		bool is_animating = 0 <= w->animation_progress && w->animation_progress < 1.0;
+		if (w->frame_opacity == 1 && !is_animating) {
+			ps->backend_data->ops->compose(ps->backend_data, w, w->win_image,
+			                               w->g.x, w->g.y,
+						       w->g.x + w->widthb, w->g.y + w->heightb,
+			                               &reg_paint_in_bound, &reg_visible);
+		} else {
+			if (is_animating && w->old_win_image) {
+				assert(w->old_win_image);
+				process_window_for_painting(ps, w, w->win_image,
+							    w->opacity >= 1 ? 1.0 : w->animation_progress,
+							    &reg_bound, &reg_visible,
+							    &reg_paint, &reg_paint_in_bound);
+				process_window_for_painting(ps, w, w->old_win_image,
+							    1.0 - w->animation_progress,
+							    &reg_bound, &reg_visible,
+							    &reg_paint, &reg_paint_in_bound);
+			} else {
+				process_window_for_painting(ps, w, w->win_image,
+							    1.0,
+							    &reg_bound, &reg_visible,
+							    &reg_paint, &reg_paint_in_bound);
+			}
+		}
+	skip:
 		// Round the corners as last step after blur/shadow/dim/etc
 		if (w->corner_radius > 0.0) {
 			ps->backend_data->ops->round(ps->backend_data, w,
 						ps->backend_round_context, w->win_image,
 						&reg_bound, &reg_visible);
 		}
-
 		pixman_region32_fini(&reg_bound);
 		pixman_region32_fini(&reg_paint_in_bound);
 	}
 	pixman_region32_fini(&reg_paint);
+	pixman_region32_fini(&reg_shadow_clip);
 
 	if (ps->o.monitor_repaint) {
+		const struct color DEBUG_COLOR = {0.5, 0, 0, 0.5};
 		auto reg_damage_debug = get_damage(ps, false);
-		ps->backend_data->ops->fill(
-		    ps->backend_data, (struct color){0.5, 0, 0, 0.5}, &reg_damage_debug);
+		ps->backend_data->ops->fill(ps->backend_data, DEBUG_COLOR, &reg_damage_debug);
 		pixman_region32_fini(&reg_damage_debug);
 	}
 

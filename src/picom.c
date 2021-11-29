@@ -121,6 +121,7 @@ static inline void free_xinerama_info(session_t *ps) {
 		for (int i = 0; i < ps->xinerama_nscrs; ++i)
 			pixman_region32_fini(&ps->xinerama_scr_regs[i]);
 		free(ps->xinerama_scr_regs);
+		ps->xinerama_scr_regs = NULL;
 	}
 	ps->xinerama_nscrs = 0;
 }
@@ -298,6 +299,10 @@ void discard_ignore(session_t *ps, unsigned long sequence) {
 }
 
 static int should_ignore(session_t *ps, unsigned long sequence) {
+	if (ps == NULL) {
+		// Do not ignore errors until the session has been initialized
+		return false;
+	}
 	discard_ignore(ps, sequence);
 	return ps->ignore_head && ps->ignore_head->sequence == sequence;
 }
@@ -643,15 +648,135 @@ static void handle_root_flags(session_t *ps) {
 	}
 }
 
-static struct managed_win *paint_preprocess(session_t *ps, bool *fade_running) {
+static struct managed_win *
+paint_preprocess(session_t *ps, bool *fade_running, bool *animation_running) {
 	// XXX need better, more general name for `fade_running`. It really
-	// means if fade is still ongoing after the current frame is rendered
+	// means if fade is still ongoing after the current frame is rendered.
+	// Same goes for `animation_running`.
 	struct managed_win *bottom = NULL;
 	*fade_running = false;
+	*animation_running = false;
+	auto now = get_time_ms();
+
+	// IMPORTANT: These window animation steps must happen before any other
+	//            [pre]processing. This is because it changes the window's geometry.
+	if (ps->o.animations) {
+		if (!ps->animation_time)
+			ps->animation_time = now;
+		double delta_secs = (double)(now - ps->animation_time) / 1000;
+		win_stack_foreach_managed_safe(w, &ps->window_stack) {
+			// Only animate mapped windows
+			if (!win_is_mapped_in_x(w))
+				continue;
+
+			double neg_displacement_x =
+			    w->animation_dest_center_x - w->animation_center_x;
+			double neg_displacement_y =
+			    w->animation_dest_center_y - w->animation_center_y;
+			double neg_displacement_w = w->animation_dest_w - w->animation_w;
+			double neg_displacement_h = w->animation_dest_h - w->animation_h;
+			double acceleration_x =
+			    (ps->o.animation_stiffness * neg_displacement_x -
+			     ps->o.animation_dampening * w->animation_velocity_x) /
+			    ps->o.animation_window_mass;
+			double acceleration_y =
+			    (ps->o.animation_stiffness * neg_displacement_y -
+			     ps->o.animation_dampening * w->animation_velocity_y) /
+			    ps->o.animation_window_mass;
+			double acceleration_w =
+			    (ps->o.animation_stiffness * neg_displacement_w -
+			     ps->o.animation_dampening * w->animation_velocity_w) /
+			    ps->o.animation_window_mass;
+			double acceleration_h =
+			    (ps->o.animation_stiffness * neg_displacement_h -
+			     ps->o.animation_dampening * w->animation_velocity_h) /
+			    ps->o.animation_window_mass;
+			w->animation_velocity_x += acceleration_x * delta_secs;
+			w->animation_velocity_y += acceleration_y * delta_secs;
+			w->animation_velocity_w += acceleration_w * delta_secs;
+			w->animation_velocity_h += acceleration_h * delta_secs;
+
+			// Animate window geometry
+			double new_animation_x =
+			    w->animation_center_x + w->animation_velocity_x * delta_secs;
+			double new_animation_y =
+			    w->animation_center_y + w->animation_velocity_y * delta_secs;
+			double new_animation_w =
+			    w->animation_w + w->animation_velocity_w * delta_secs;
+			double new_animation_h =
+			    w->animation_h + w->animation_velocity_h * delta_secs;
+
+			if (ps->o.animation_clamping) {
+				w->animation_center_x = clamp(
+				    new_animation_x,
+				    min2(w->animation_center_x, w->animation_dest_center_x),
+				    max2(w->animation_center_x, w->animation_dest_center_x));
+				w->animation_center_y = clamp(
+				    new_animation_y,
+				    min2(w->animation_center_y, w->animation_dest_center_y),
+				    max2(w->animation_center_y, w->animation_dest_center_y));
+				w->animation_w =
+				    clamp(new_animation_w,
+				          min2(w->animation_w, w->animation_dest_w),
+				          max2(w->animation_w, w->animation_dest_w));
+				w->animation_h =
+				    clamp(new_animation_h,
+				          min2(w->animation_h, w->animation_dest_h),
+				          max2(w->animation_h, w->animation_dest_h));
+			} else {
+				w->animation_center_x = new_animation_x;
+				w->animation_center_y = new_animation_y;
+				w->animation_w = new_animation_w;
+				w->animation_h = new_animation_h;
+			}
+
+			// Now we are done doing the math; we just need to submit our
+			// changes (if there are any).
+
+			struct win_geometry old_g = w->g;
+			w->g.x = (int16_t)round(w->animation_center_x - w->animation_w * 0.5);
+			w->g.y = (int16_t)round(w->animation_center_y - w->animation_h * 0.5);
+			w->g.width = (uint16_t)round(w->animation_w);
+			w->g.height = (uint16_t)round(w->animation_h);
+
+			bool position_changed = w->g.x != old_g.x || w->g.y != old_g.y;
+			bool size_changed =
+			    w->g.width != old_g.width || w->g.height != old_g.height;
+			bool geometry_changed = position_changed || size_changed;
+
+			// Mark past window region with damage
+			if (w->to_paint && geometry_changed)
+				add_damage_from_win(ps, w);
+
+			// Submit window size change
+			if (size_changed) {
+				win_on_win_size_change(ps, w);
+
+				pixman_region32_clear(&w->bounding_shape);
+				pixman_region32_fini(&w->bounding_shape);
+				pixman_region32_init_rect(&w->bounding_shape, 0, 0,
+				                          (uint)w->widthb, (uint)w->heightb);
+
+				win_clear_flags(w, WIN_FLAGS_PIXMAP_STALE);
+				win_process_image_flags(ps, w);
+			}
+			// Mark new window region with damage
+			if (w->to_paint && geometry_changed)
+				add_damage_from_win(ps, w);
+
+			double x_dist = w->animation_dest_center_x - w->animation_center_x;
+			double y_dist = w->animation_dest_center_y - w->animation_center_y;
+			w->animation_progress =
+			    1.0 - w->animation_inv_og_distance *
+			              sqrt(x_dist * x_dist + y_dist * y_dist);
+			*animation_running = true;
+		}
+		// Okay, now we can continue on to the rest of the [pre]processing.
+		ps->animation_time = now;
+	}
 
 	// Fading step calculation
 	long steps = 0L;
-	auto now = get_time_ms();
 	if (ps->fade_time) {
 		assert(now >= ps->fade_time);
 		steps = (now - ps->fade_time) / ps->o.fade_delta;
@@ -913,9 +1038,9 @@ void root_damaged(session_t *ps) {
 		if (pixmap != XCB_NONE) {
 			ps->root_image = ps->backend_data->ops->bind_pixmap(
 			    ps->backend_data, pixmap, x_get_visual_info(ps->c, ps->vis), false);
-			ps->backend_data->ops->image_op(
-			    ps->backend_data, IMAGE_OP_RESIZE_TILE, ps->root_image, NULL,
-			    NULL, (int[]){ps->root_width, ps->root_height});
+			ps->backend_data->ops->set_image_property(
+			    ps->backend_data, IMAGE_PROPERTY_EFFECTIVE_SIZE,
+			    ps->root_image, (int[]){ps->root_width, ps->root_height});
 		}
 	}
 
@@ -927,8 +1052,9 @@ void root_damaged(session_t *ps) {
  * Xlib error handler function.
  */
 static int xerror(Display attr_unused *dpy, XErrorEvent *ev) {
-	if (!should_ignore(ps_g, ev->serial))
+	if (!should_ignore(ps_g, ev->serial)) {
 		x_print_error(ev->serial, ev->request_code, ev->minor_code, ev->error_code);
+	}
 	return 0;
 }
 
@@ -936,8 +1062,9 @@ static int xerror(Display attr_unused *dpy, XErrorEvent *ev) {
  * XCB error handler function.
  */
 void ev_xcb_error(session_t *ps, xcb_generic_error_t *err) {
-	if (!should_ignore(ps, err->sequence))
+	if (!should_ignore(ps, err->sequence)) {
 		x_print_error(err->sequence, err->major_code, err->minor_code, err->error_code);
+	}
 }
 
 /**
@@ -1438,6 +1565,11 @@ static void fade_timer_callback(EV_P attr_unused, ev_timer *w, int revents attr_
 	queue_redraw(ps);
 }
 
+static void animation_timer_callback(EV_P attr_unused, ev_timer *w, int revents attr_unused) {
+	session_t *ps = session_ptr(w, animation_timer);
+	queue_redraw(ps);
+}
+
 static void handle_pending_updates(EV_P_ struct session *ps) {
 	if (ps->pending_updates) {
 		log_debug("Delayed handling of events, entering critical section");
@@ -1522,8 +1654,9 @@ static void draw_callback_impl(EV_P_ session_t *ps, int revents attr_unused) {
 	 * screen is not redirected. its sole purpose should be to decide whether the
 	 * screen should be redirected. */
 	bool fade_running = false;
+	bool animation_running = false;
 	bool was_redirected = ps->redirected;
-	auto bottom = paint_preprocess(ps, &fade_running);
+	auto bottom = paint_preprocess(ps, &fade_running, &animation_running);
 	ps->tmout_unredir_hit = false;
 
 	if (!was_redirected && ps->redirected) {
@@ -1544,6 +1677,13 @@ static void draw_callback_impl(EV_P_ session_t *ps, int revents attr_unused) {
 	} else if (fade_running && !ev_is_active(&ps->fade_timer)) {
 		ev_timer_set(&ps->fade_timer, fade_timeout(ps), 0);
 		ev_timer_start(EV_A_ & ps->fade_timer);
+	}
+	// Start/stop animation timer depends on whether windows are animating
+	if (!animation_running && ev_is_active(&ps->animation_timer)) {
+		ev_timer_stop(EV_A_ & ps->animation_timer);
+	} else if (animation_running && !ev_is_active(&ps->animation_timer)) {
+		ev_timer_set(&ps->animation_timer, 0, 0);
+		ev_timer_start(EV_A_ & ps->animation_timer);
 	}
 
 	// If the screen is unredirected, free all_damage to stop painting
@@ -1567,6 +1707,9 @@ static void draw_callback_impl(EV_P_ session_t *ps, int revents attr_unused) {
 
 	if (!fade_running) {
 		ps->fade_time = 0L;
+	}
+	if (!animation_running) {
+		ps->animation_time = 0L;
 	}
 
 	// TODO(yshui) Investigate how big the X critical section needs to be. There are
@@ -1692,6 +1835,7 @@ static session_t *session_init(int argc, char **argv, Display *dpy,
 	    .redirected = false,
 	    .alpha_picts = NULL,
 	    .fade_time = 0L,
+	    .animation_time = 0L,
 	    .ignore_head = NULL,
 	    .ignore_tail = NULL,
 	    .quit = false,
@@ -1933,6 +2077,7 @@ static session_t *session_init(int argc, char **argv, Display *dpy,
 	if (!(c2_list_postprocess(ps, ps->o.unredir_if_possible_blacklist) &&
 	      c2_list_postprocess(ps, ps->o.paint_blacklist) &&
 	      c2_list_postprocess(ps, ps->o.shadow_blacklist) &&
+	      c2_list_postprocess(ps, ps->o.shadow_clip_list) &&
 	      c2_list_postprocess(ps, ps->o.fade_blacklist) &&
 	      c2_list_postprocess(ps, ps->o.blur_background_blacklist) &&
 	      c2_list_postprocess(ps, ps->o.invert_color_list) &&
@@ -2158,6 +2303,7 @@ static session_t *session_init(int argc, char **argv, Display *dpy,
 		ev_idle_init(&ps->draw_idle, draw_callback);
 
 	ev_init(&ps->fade_timer, fade_timer_callback);
+	ev_init(&ps->animation_timer, animation_timer_callback);
 	ev_init(&ps->delayed_draw_timer, delayed_draw_timer_callback);
 
 	// Set up SIGUSR1 signal handler to reset program
@@ -2310,6 +2456,7 @@ static void session_destroy(session_t *ps) {
 
 	// Free blacklists
 	free_wincondlst(&ps->o.shadow_blacklist);
+	free_wincondlst(&ps->o.shadow_clip_list);
 	free_wincondlst(&ps->o.fade_blacklist);
 	free_wincondlst(&ps->o.focus_blacklist);
 	free_wincondlst(&ps->o.invert_color_list);
@@ -2435,6 +2582,7 @@ static void session_destroy(session_t *ps) {
 	// Stop libev event handlers
 	ev_timer_stop(ps->loop, &ps->unredir_timer);
 	ev_timer_stop(ps->loop, &ps->fade_timer);
+	ev_timer_stop(ps->loop, &ps->animation_timer);
 	ev_idle_stop(ps->loop, &ps->draw_idle);
 	ev_prepare_stop(ps->loop, &ps->event_check);
 	ev_signal_stop(ps->loop, &ps->usr1_signal);

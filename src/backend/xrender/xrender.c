@@ -70,47 +70,157 @@ struct _xrender_blur_context {
 	int x_blur_kernel_count;
 };
 
-struct _xrender_image_data {
+struct _xrender_image_data_inner {
+	// struct backend_image_inner_base
+	int refcount;
+	bool has_alpha;
+
 	// Pixmap that the client window draws to,
 	// it will contain the content of client window.
 	xcb_pixmap_t pixmap;
 	// A Picture links to the Pixmap
 	xcb_render_picture_t pict;
 	int width, height;
-	// The effective size of the image
-	int ewidth, eheight;
-	bool has_alpha;
-	double opacity;
 	xcb_visualid_t visual;
 	uint8_t depth;
+	// Whether we own this image, e.g. we allocated it;
+	// or not, e.g. this is a named pixmap of a X window.
 	bool owned;
 };
 
 uint32_t make_rounded_window_shape(xcb_render_trapezoid_t traps[], uint32_t max_ntraps, int cr, int wid, int hei);
 
-static void compose(backend_t *base, struct managed_win *w, void *img_data, int dst_x, int dst_y,
-                    const region_t *reg_paint, const region_t *reg_visible) {
-	struct _xrender_data *xd = (void *)base;
-	struct _xrender_image_data *img = img_data;
+static void compose_draw(struct _xrender_data *xd, const struct backend_image *img, const struct _xrender_image_data_inner *inner, bool has_alpha,
+						 int dst_x1, int dst_y1, int tmpw, int tmph, int tmpew, int tmpeh, unsigned int alpha_pict, const struct region_t *reg,
+						 const xcb_render_color_t dim_color, xcb_render_picture_t result)
+{
+	if ((img->color_inverted || img->dim != 0) && has_alpha) {
+		// Apply image properties using a temporary image, because the source
+		// image is transparent. Otherwise the properties can be applied directly
+		// on the target image.
+		auto tmp_pict =
+		    x_create_picture_with_visual(xd->base.c, xd->base.root, inner->width,
+		                                 inner->height, inner->visual, 0, NULL);
+
+		// Set clip region translated to source coordinate
+		x_set_picture_clip_region(xd->base.c, tmp_pict, to_i16_checked(-dst_x1),
+		                          to_i16_checked(-dst_y1), reg);
+		// Copy source -> tmp
+		xcb_render_composite(xd->base.c, XCB_RENDER_PICT_OP_OVER, inner->pict,
+		                     XCB_NONE, tmp_pict, 0, 0, 0, 0, 0, 0, tmpw, tmph);
+		if (img->color_inverted) {
+			if (inner->has_alpha) {
+				auto tmp_pict2 = x_create_picture_with_visual(
+				    xd->base.c, xd->base.root, tmpw, tmph, inner->visual,
+				    0, NULL);
+				xcb_render_composite(xd->base.c, XCB_RENDER_PICT_OP_OVER,
+				                     tmp_pict, XCB_NONE, tmp_pict2, 0, 0,
+				                     0, 0, 0, 0, tmpw, tmph);
+
+				xcb_render_composite(xd->base.c, XCB_RENDER_PICT_OP_DIFFERENCE,
+				                     xd->white_pixel, XCB_NONE, tmp_pict,
+				                     0, 0, 0, 0, 0, 0, tmpw, tmph);
+				xcb_render_composite(
+				    xd->base.c, XCB_RENDER_PICT_OP_IN_REVERSE, tmp_pict2,
+				    XCB_NONE, tmp_pict, 0, 0, 0, 0, 0, 0, tmpw, tmph);
+				xcb_render_free_picture(xd->base.c, tmp_pict2);
+			} else {
+				xcb_render_composite(xd->base.c, XCB_RENDER_PICT_OP_DIFFERENCE,
+				                     xd->white_pixel, XCB_NONE, tmp_pict,
+				                     0, 0, 0, 0, 0, 0, tmpw, tmph);
+			}
+		}
+		if (img->dim != 0) {
+			// Dim the actually content of window
+			xcb_rectangle_t rect = {
+			    .x = 0,
+			    .y = 0,
+			    .width = tmpw,
+			    .height = tmph,
+			};
+
+			xcb_render_fill_rectangles(xd->base.c, XCB_RENDER_PICT_OP_OVER,
+			                           tmp_pict, dim_color, 1, &rect);
+		}
+
+		xcb_render_composite(xd->base.c, XCB_RENDER_PICT_OP_OVER, tmp_pict,
+		                     alpha_pict, result, 0, 0, 0, 0, to_i16_checked(dst_x1),
+		                     to_i16_checked(dst_y1), tmpew, tmpeh);
+		xcb_render_free_picture(xd->base.c, tmp_pict);
+	} else {
+		uint8_t op = (has_alpha ? XCB_RENDER_PICT_OP_OVER : XCB_RENDER_PICT_OP_SRC);
+
+		xcb_render_composite(xd->base.c, op, inner->pict, alpha_pict, result, 0,
+		                     0, 0, 0, to_i16_checked(dst_x1),
+		                     to_i16_checked(dst_y1), tmpew, tmpeh);
+		if (img->dim != 0 || img->color_inverted) {
+			// Apply properties, if we reach here, then has_alpha == false
+			assert(!has_alpha);
+			if (img->color_inverted) {
+				xcb_render_composite(xd->base.c, XCB_RENDER_PICT_OP_DIFFERENCE,
+				                     xd->white_pixel, XCB_NONE, result, 0,
+				                     0, 0, 0, to_i16_checked(dst_x1),
+				                     to_i16_checked(dst_y1), tmpew, tmpeh);
+			}
+
+			if (img->dim != 0) {
+				// Dim the actually content of window
+				xcb_rectangle_t rect = {
+				    .x = to_i16_checked(dst_x1),
+				    .y = to_i16_checked(dst_y1),
+				    .width = tmpew,
+				    .height = tmpeh,
+				};
+
+				xcb_render_fill_rectangles(xd->base.c, XCB_RENDER_PICT_OP_OVER,
+				                           result, dim_color, 1, &rect);
+			}
+		}
+	}
+}
+
+static void compose_impl(struct _xrender_data *xd, struct managed_win *w, const struct backend_image *img,
+						 int dst_x1, int dst_y1, int dst_x2, int dst_y2,
+                 const region_t *reg_paint, const region_t *reg_visible
+				 xcb_render_picture_t result) {
 	uint8_t op = (img->has_alpha ? XCB_RENDER_PICT_OP_OVER : XCB_RENDER_PICT_OP_SRC);
 	auto alpha_pict = xd->alpha_pict[(int)(img->opacity * MAX_ALPHA)];
+	auto inner = (struct _xrender_image_data_inner *)img->inner;
 	region_t reg;
+
+	bool has_alpha = inner->has_alpha || img->opacity != 1;
+	const auto tmpw = to_u16_checked(dst_x2 - dst_x1);
+	const auto tmph = to_u16_checked(dst_y2 - dst_y1);
+	const auto tmpew = to_u16_checked(dst_x2 - dst_x1);
+	const auto tmpeh = to_u16_checked(dst_y2 - dst_y1);
+	const xcb_render_color_t dim_color = {
+	    .red = 0, .green = 0, .blue = 0, .alpha = (uint16_t)(0xffff * img->dim)};
+
+	// Clip region of rendered_pict might be set during rendering, clear it to
+	// make sure we get everything into the buffer
+	x_clear_picture_clip_region(xd->base.c, inner->pict);
+
 	pixman_region32_init(&reg);
 	pixman_region32_intersect(&reg, (region_t *)reg_paint, (region_t *)reg_visible);
+	x_set_picture_clip_region(xd->base.c, result, 0, 0, &reg);
 
-	// Clip region of rendered_pict might be set during rendering, clear it to make
-	// sure we get everything into the buffer
-	x_clear_picture_clip_region(base->c, img->pict);
+#define DOUBLE_TO_XFIXED(value) ((xcb_render_fixed_t)(((double)(value)) * 65536))
+		{
+			const xcb_render_transform_t transform = {
+				DOUBLE_TO_XFIXED((double)img->ewidth / (double)tmpew), DOUBLE_TO_XFIXED(0.0), DOUBLE_TO_XFIXED(0.0),
+				DOUBLE_TO_XFIXED(0.0), DOUBLE_TO_XFIXED((double)img->eheight / (double)tmpeh), DOUBLE_TO_XFIXED(0.0),
+				DOUBLE_TO_XFIXED(0.0), DOUBLE_TO_XFIXED(0.0), DOUBLE_TO_XFIXED(1.0),
+			};
+			xcb_render_set_picture_transform(xd->base.c, inner->pict, transform);
+			xcb_render_set_picture_filter(xd->base.c, inner->pict, 7, "nearest", 0, NULL);
+		}
+#undef DOUBLE_TO_XFIXED
 
 	// Are we rounding corners?
 	session_t *ps = base->ps;
 	int cr = (w ? w->corner_radius : 0);
-
 	if (!img->has_alpha || cr == 0) {
-		x_set_picture_clip_region(base->c, xd->back[2], 0, 0, &reg);
-		xcb_render_composite(base->c, op, img->pict, alpha_pict, xd->back[2], 0, 0, 0, 0,
-	                    	 to_i16_checked(dst_x), to_i16_checked(dst_y),
-	                    	 to_u16_checked(img->ewidth), to_u16_checked(img->eheight));
+		compose_draw(xd, img, inner, has_alpha, dst_x1, dst_y1, tmpw, tmph, tmpew, tmpeh, alpha_pict, &reg, dim_color, result);
 	} else {
 		// Rounded corners
 		const int fullwid = w ? w->widthb : 0;
@@ -142,15 +252,19 @@ static void compose(backend_t *base, struct managed_win *w, void *img_data, int 
 		    x_get_pictfmt_for_standard(ps->c, XCB_PICT_STANDARD_A_8),
 		    0, 0, n, traps);
 
-		x_set_picture_clip_region(base->c, xd->back[2], 0, 0, &reg);
-		xcb_render_composite(base->c, XCB_RENDER_PICT_OP_OVER,
-	                    	 img->pict, p_tmp, xd->back[2], 0, 0, 0, 0,
-	                    	 to_i16_checked(dst_x), to_i16_checked(dst_y),
-	                    	 to_u16_checked(img->ewidth), to_u16_checked(img->eheight));
+		compose_draw(xd, img, inner, has_alpha, dst_x1, dst_y1, tmpw, tmph, tmpew, tmpeh, alpha_pict, &reg, dim_color, result);
 
 		xcb_render_free_picture(ps->c, p_tmp);
 	}
 	pixman_region32_fini(&reg);
+}
+
+static void compose(backend_t *base, void *img_data,
+		    int dst_x1, int dst_y1, int dst_x2, int dst_y2,
+                    const region_t *reg_paint, const region_t *reg_visible) {
+	// TODO(dccsillag): use dst_{x,y}2
+	struct _xrender_data *xd = (void *)base;
+	return compose_impl(xd, img_data, dst_x1, dst_y1, dst_x2, dst_y2, reg_paint, reg_visible, xd->back[2]);
 }
 
 static void fill(backend_t *base, struct color c, const region_t *clip) {
@@ -310,31 +424,42 @@ bind_pixmap(backend_t *base, xcb_pixmap_t pixmap, struct xvisual_info fmt, bool 
 		return NULL;
 	}
 
-	auto img = ccalloc(1, struct _xrender_image_data);
-	img->depth = (uint8_t)fmt.visual_depth;
-	img->width = img->ewidth = r->width;
-	img->height = img->eheight = r->height;
-	img->pixmap = pixmap;
-	img->opacity = 1;
-	img->has_alpha = fmt.alpha_size != 0;
-	img->pict =
+	auto img = ccalloc(1, struct backend_image);
+	auto inner = ccalloc(1, struct _xrender_image_data_inner);
+	inner->depth = (uint8_t)fmt.visual_depth;
+	inner->width = img->ewidth = r->width;
+	inner->height = img->eheight = r->height;
+	inner->pixmap = pixmap;
+	inner->has_alpha = fmt.alpha_size != 0;
+	inner->pict =
 	    x_create_picture_with_visual_and_pixmap(base->c, fmt.visual, pixmap, 0, NULL);
-	img->owned = owned;
-	img->visual = fmt.visual;
+	inner->owned = owned;
+	inner->visual = fmt.visual;
+	inner->refcount = 1;
+
+	img->inner = (struct backend_image_inner_base *)inner;
+	img->opacity = 1;
 	free(r);
 
-	if (img->pict == XCB_NONE) {
+	if (inner->pict == XCB_NONE) {
+		free(inner);
 		free(img);
 		return NULL;
 	}
 	return img;
 }
-
+static void release_image_inner(backend_t *base, struct _xrender_image_data_inner *inner) {
+	xcb_render_free_picture(base->c, inner->pict);
+	if (inner->owned) {
+		xcb_free_pixmap(base->c, inner->pixmap);
+	}
+	free(inner);
+}
 static void release_image(backend_t *base, void *image) {
-	struct _xrender_image_data *img = image;
-	xcb_render_free_picture(base->c, img->pict);
-	if (img->owned) {
-		xcb_free_pixmap(base->c, img->pixmap);
+	struct backend_image *img = image;
+	img->inner->refcount--;
+	if (img->inner->refcount == 0) {
+		release_image_inner(base, (void *)img->inner);
 	}
 	free(img);
 }
@@ -430,71 +555,71 @@ static int buffer_age(backend_t *backend_data) {
 	return xd->buffer_age[xd->curr_back];
 }
 
-static bool is_image_transparent(backend_t *bd attr_unused, void *image) {
-	struct _xrender_image_data *img = image;
-	return img->has_alpha;
+static struct _xrender_image_data_inner *
+new_inner(backend_t *base, int w, int h, xcb_visualid_t visual, uint8_t depth) {
+	auto new_inner = ccalloc(1, struct _xrender_image_data_inner);
+	new_inner->pixmap = x_create_pixmap(base->c, depth, base->root, w, h);
+	if (new_inner->pixmap == XCB_NONE) {
+		log_error("Failed to create pixmap for copy");
+		free(new_inner);
+		return NULL;
+	}
+	new_inner->pict = x_create_picture_with_visual_and_pixmap(
+	    base->c, visual, new_inner->pixmap, 0, NULL);
+	if (new_inner->pict == XCB_NONE) {
+		log_error("Failed to create picture for copy");
+		xcb_free_pixmap(base->c, new_inner->pixmap);
+		free(new_inner);
+		return NULL;
+	}
+	new_inner->width = w;
+	new_inner->height = h;
+	new_inner->visual = visual;
+	new_inner->depth = depth;
+	new_inner->refcount = 1;
+	new_inner->owned = true;
+	return new_inner;
+}
+
+static bool decouple_image(backend_t *base, struct backend_image *img, const region_t *reg) {
+	if (img->inner->refcount == 1) {
+		return true;
+	}
+	auto inner = (struct _xrender_image_data_inner *)img->inner;
+	// Force new pixmap to a 32-bit ARGB visual to allow for transparent frames around
+	// non-transparent windows
+	auto visual = (inner->depth == 32)
+	                  ? inner->visual
+	                  : x_get_visual_for_standard(base->c, XCB_PICT_STANDARD_ARGB_32);
+	auto inner2 = new_inner(base, inner->width, inner->height, visual, 32);
+	if (!inner2) {
+		return false;
+	}
+
+	x_set_picture_clip_region(base->c, inner->pict, 0, 0, reg);
+	xcb_render_composite(base->c, XCB_RENDER_PICT_OP_SRC, inner->pict, XCB_NONE,
+	                     inner2->pict, 0, 0, 0, 0, 0, 0, to_u16_checked(inner->width),
+	                     to_u16_checked(inner->height));
+
+	img->inner = (struct backend_image_inner_base *)inner2;
+	inner->refcount--;
+	return true;
 }
 
 static bool image_op(backend_t *base, enum image_operations op, void *image,
                      const region_t *reg_op, const region_t *reg_visible, void *arg) {
 	struct _xrender_data *xd = (void *)base;
-	struct _xrender_image_data *img = image;
+	struct backend_image *img = image;
 	region_t reg;
 	double *dargs = arg;
-	int *iargs = arg;
-	if (op == IMAGE_OP_APPLY_ALPHA_ALL) {
-		img->opacity *= dargs[0];
-		img->has_alpha = true;
-		return true;
-	}
 
 	pixman_region32_init(&reg);
+	pixman_region32_intersect(&reg, (region_t *)reg_op, (region_t *)reg_visible);
 
-	const auto tmpw = to_u16_checked(img->width);
-	const auto tmph = to_u16_checked(img->height);
 	switch (op) {
-	case IMAGE_OP_INVERT_COLOR_ALL:
-		x_set_picture_clip_region(base->c, img->pict, 0, 0, reg_visible);
-		if (img->has_alpha) {
-			auto tmp_pict =
-			    x_create_picture_with_visual(base->c, base->root, img->width,
-			                                 img->height, img->visual, 0, NULL);
-			xcb_render_composite(base->c, XCB_RENDER_PICT_OP_SRC, img->pict,
-			                     XCB_NONE, tmp_pict, 0, 0, 0, 0, 0, 0, tmpw, tmph);
-
-			xcb_render_composite(base->c, XCB_RENDER_PICT_OP_DIFFERENCE,
-			                     xd->white_pixel, XCB_NONE, img->pict, 0, 0,
-			                     0, 0, 0, 0, tmpw, tmph);
-			xcb_render_composite(base->c, XCB_RENDER_PICT_OP_IN_REVERSE,
-			                     tmp_pict, XCB_NONE, img->pict, 0, 0, 0, 0, 0,
-			                     0, tmpw, tmph);
-			xcb_render_free_picture(base->c, tmp_pict);
-		} else {
-			xcb_render_composite(base->c, XCB_RENDER_PICT_OP_DIFFERENCE,
-			                     xd->white_pixel, XCB_NONE, img->pict, 0, 0,
-			                     0, 0, 0, 0, tmpw, tmph);
-		}
-		break;
-	case IMAGE_OP_DIM_ALL:
-		x_set_picture_clip_region(base->c, img->pict, 0, 0, reg_visible);
-
-		xcb_render_color_t color = {
-		    .red = 0, .green = 0, .blue = 0, .alpha = (uint16_t)(0xffff * dargs[0])};
-
-		// Dim the actually content of window
-		xcb_rectangle_t rect = {
-		    .x = 0,
-		    .y = 0,
-		    .width = tmpw,
-		    .height = tmph,
-		};
-
-		xcb_render_fill_rectangles(base->c, XCB_RENDER_PICT_OP_OVER, img->pict,
-		                           color, 1, &rect);
-		break;
 	case IMAGE_OP_APPLY_ALPHA:
 		assert(reg_op);
-		pixman_region32_intersect(&reg, (region_t *)reg_op, (region_t *)reg_visible);
+
 		if (!pixman_region32_not_empty(&reg)) {
 			break;
 		}
@@ -503,59 +628,27 @@ static bool image_op(backend_t *base, enum image_operations op, void *image,
 			break;
 		}
 
+		if (!decouple_image(base, img, reg_visible)) {
+			pixman_region32_fini(&reg);
+			return false;
+		}
+
+		auto inner = (struct _xrender_image_data_inner *)img->inner;
 		auto alpha_pict = xd->alpha_pict[(int)((1 - dargs[0]) * MAX_ALPHA)];
-		x_set_picture_clip_region(base->c, img->pict, 0, 0, &reg);
+		x_set_picture_clip_region(base->c, inner->pict, 0, 0, &reg);
 		xcb_render_composite(base->c, XCB_RENDER_PICT_OP_OUT_REVERSE, alpha_pict,
-		                     XCB_NONE, img->pict, 0, 0, 0, 0, 0, 0, tmpw, tmph);
-		img->has_alpha = true;
+		                     XCB_NONE, inner->pict, 0, 0, 0, 0, 0, 0,
+		                     to_u16_checked(inner->width),
+		                     to_u16_checked(inner->height));
+		inner->has_alpha = true;
 		break;
-	case IMAGE_OP_RESIZE_TILE:
-		img->ewidth = iargs[0];
-		img->eheight = iargs[1];
-		break;
-	case IMAGE_OP_APPLY_ALPHA_ALL: assert(false);
-	case IMAGE_OP_MAX_BRIGHTNESS: assert(false);
 	}
 	pixman_region32_fini(&reg);
 	return true;
 }
 
-// TODO(yshui): use copy-on-write
-static void *copy(backend_t *base, const void *image, const region_t *reg) {
-	const struct _xrender_image_data *img = image;
-	struct _xrender_data *xd = (void *)base;
-	auto new_img = ccalloc(1, struct _xrender_image_data);
-	assert(img->visual != XCB_NONE);
-	log_trace("xrender: copying %#010x visual %#x", img->pixmap, img->visual);
-	*new_img = *img;
-	x_set_picture_clip_region(base->c, img->pict, 0, 0, reg);
-	new_img->pixmap =
-	    x_create_pixmap(base->c, img->depth, base->root, img->width, img->height);
-	new_img->opacity = 1;
-	new_img->owned = true;
-	if (new_img->pixmap == XCB_NONE) {
-		log_error("Failed to create pixmap for copy");
-		free(new_img);
-		return NULL;
-	}
-	new_img->pict = x_create_picture_with_visual_and_pixmap(base->c, img->visual,
-	                                                        new_img->pixmap, 0, NULL);
-	if (new_img->pict == XCB_NONE) {
-		log_error("Failed to create picture for copy");
-		xcb_free_pixmap(base->c, new_img->pixmap);
-		free(new_img);
-		return NULL;
-	}
-
-	xcb_render_picture_t alpha_pict =
-	    img->opacity == 1 ? XCB_NONE : xd->alpha_pict[(int)(img->opacity * MAX_ALPHA)];
-	xcb_render_composite(base->c, XCB_RENDER_PICT_OP_SRC, img->pict, alpha_pict,
-	                     new_img->pict, 0, 0, 0, 0, 0, 0, to_u16_checked(img->width),
-	                     to_u16_checked(img->height));
-	return new_img;
-}
-
-void *create_blur_context(backend_t *base attr_unused, enum blur_method method, void *args) {
+static void *
+create_blur_context(backend_t *base attr_unused, enum blur_method method, void *args) {
 	auto ret = ccalloc(1, struct _xrender_blur_context);
 	if (!method || method >= BLUR_METHOD_INVALID) {
 		ret->method = BLUR_METHOD_NONE;
@@ -598,7 +691,7 @@ void *create_blur_context(backend_t *base attr_unused, enum blur_method method, 
 	return ret;
 }
 
-void destroy_blur_context(backend_t *base attr_unused, void *ctx_) {
+static void destroy_blur_context(backend_t *base attr_unused, void *ctx_) {
 	struct _xrender_blur_context *ctx = ctx_;
 	for (int i = 0; i < ctx->x_blur_kernel_count; i++) {
 		free(ctx->x_blur_kernel[i]);
@@ -607,7 +700,7 @@ void destroy_blur_context(backend_t *base attr_unused, void *ctx_) {
 	free(ctx);
 }
 
-void get_blur_size(void *blur_context, int *width, int *height) {
+static void get_blur_size(void *blur_context, int *width, int *height) {
 	struct _xrender_blur_context *ctx = blur_context;
 	*width = ctx->resize_width;
 	*height = ctx->resize_height;
@@ -626,7 +719,31 @@ void *create_round_context(struct backend_base *base attr_unused, void *args att
 void destroy_round_context(struct backend_base *base attr_unused, void *ctx attr_unused) {
 }
 
-backend_t *backend_xrender_init(session_t *ps) {
+static bool
+read_pixel(backend_t *backend_data, void *image_data, int x, int y, struct color *output) {
+	auto xd = (struct _xrender_data *)backend_data;
+	auto img = (struct backend_image *)image_data;
+	auto inner = (struct _xrender_image_data_inner *)img->inner;
+
+	auto r = XCB_AWAIT(xcb_get_image, xd->base.c, XCB_IMAGE_FORMAT_XY_PIXMAP, inner->pixmap,
+	                   to_i16_checked(x), to_i16_checked(y), 1, 1, (uint32_t)-1L);
+
+	if (!r) {
+		return false;
+	}
+
+	// Color format seems to be BGRA8888, see glamor_format_for_pixmap from the
+	// Xserver codebase.
+	uint8_t *pixels = xcb_get_image_data(r);
+	output->blue = pixels[0] / 255.0;
+	output->green = pixels[1] / 255.0;
+	output->red = pixels[2] / 255.0;
+	output->alpha = pixels[3] / 255.0;
+
+	return true;
+}
+
+static backend_t *backend_xrender_init(session_t *ps) {
 	auto xd = ccalloc(1, struct _xrender_data);
 	init_backend_base(&xd->base, ps);
 
@@ -718,12 +835,14 @@ struct backend_operations xrender_ops = {
     .render_shadow = default_backend_render_shadow,
     //.prepare_win = prepare_win,
     //.release_win = release_win,
-    .is_image_transparent = is_image_transparent,
+    .is_image_transparent = default_is_image_transparent,
     .buffer_age = buffer_age,
     .max_buffer_age = 2,
 
     .image_op = image_op,
-    .copy = copy,
+    .read_pixel = read_pixel,
+    .clone_image = default_clone_image,
+    .set_image_property = default_set_image_property,
     .create_blur_context = create_blur_context,
     .destroy_blur_context = destroy_blur_context,
 	.create_round_context = create_round_context,
