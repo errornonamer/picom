@@ -916,15 +916,7 @@ bool get_cfg(options_t *opt, int argc, char *const *argv, bool shadow_enable,
 			if (!parse_rule_border(&opt->round_borders_rules, optarg))
 				exit(1);
 			break;
-		case 333:
-			// --cornor-radius
-			opt->corner_radius = atoi(optarg);
-			break;
-		case 334:
-			// --rounded-corners-exclude
-			condlst_add(&opt->rounded_corners_blacklist, optarg);
-			break;
-		case 335:
+		case 345:
 			// --clip-shadow-above
 			condlst_add(&opt->shadow_clip_list, optarg);
 			break;
