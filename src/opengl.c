@@ -1671,7 +1671,7 @@ bool glx_round_corners_dst(session_t *ps, struct managed_win *w,
 	// w->focused);
 
 	if (w->g.border_width >= 1 || w->border_width > 0) {
-		glx_read_border_pixel(w, ps->root_height, dx, dy, width, height, w->corner_radius, &w->border_col[0]);
+		glx_read_border_pixel(ps->root_height, dx, dy, width, height, w->corner_radius, &w->border_col[0]);
 	}
 
 	int mdx = dx, mdy = dy, mwidth = width, mheight = height;

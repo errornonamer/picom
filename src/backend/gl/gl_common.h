@@ -71,6 +71,17 @@ struct gl_texture {
 	void *user_data;
 };
 
+/// @brief Wrapper of a binded GLX texture.
+typedef struct gl_image {
+	struct gl_texture *inner;
+	double opacity;
+	double dim;
+	double max_brightness;
+	int ewidth, eheight;
+	bool has_alpha;
+	bool color_inverted;
+} gl_image_t;
+
 struct gl_data {
 	backend_t base;
 	// If we are using proprietary NVIDIA driver

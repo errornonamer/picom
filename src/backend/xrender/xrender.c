@@ -181,9 +181,8 @@ static void compose_draw(struct _xrender_data *xd, const struct backend_image *i
 
 static void compose_impl(struct _xrender_data *xd, struct managed_win *w, const struct backend_image *img,
 						 int dst_x1, int dst_y1, int dst_x2, int dst_y2,
-                 const region_t *reg_paint, const region_t *reg_visible
+                 const region_t *reg_paint, const region_t *reg_visible,
 				 xcb_render_picture_t result) {
-	uint8_t op = (img->has_alpha ? XCB_RENDER_PICT_OP_OVER : XCB_RENDER_PICT_OP_SRC);
 	auto alpha_pict = xd->alpha_pict[(int)(img->opacity * MAX_ALPHA)];
 	auto inner = (struct _xrender_image_data_inner *)img->inner;
 	region_t reg;
@@ -217,9 +216,9 @@ static void compose_impl(struct _xrender_data *xd, struct managed_win *w, const 
 #undef DOUBLE_TO_XFIXED
 
 	// Are we rounding corners?
-	session_t *ps = base->ps;
+	session_t *ps = xd->base.ps;
 	int cr = (w ? w->corner_radius : 0);
-	if (!img->has_alpha || cr == 0) {
+	if (!inner->has_alpha || cr == 0) {
 		compose_draw(xd, img, inner, has_alpha, dst_x1, dst_y1, tmpw, tmph, tmpew, tmpeh, alpha_pict, &reg, dim_color, result);
 	} else {
 		// Rounded corners
@@ -259,12 +258,12 @@ static void compose_impl(struct _xrender_data *xd, struct managed_win *w, const 
 	pixman_region32_fini(&reg);
 }
 
-static void compose(backend_t *base, void *img_data,
+static void compose(backend_t *base, struct managed_win *w, void *img_data,
 		    int dst_x1, int dst_y1, int dst_x2, int dst_y2,
                     const region_t *reg_paint, const region_t *reg_visible) {
 	// TODO(dccsillag): use dst_{x,y}2
 	struct _xrender_data *xd = (void *)base;
-	return compose_impl(xd, img_data, dst_x1, dst_y1, dst_x2, dst_y2, reg_paint, reg_visible, xd->back[2]);
+	return compose_impl(xd, w, img_data, dst_x1, dst_y1, dst_x2, dst_y2, reg_paint, reg_visible, xd->back[2]);
 }
 
 static void fill(backend_t *base, struct color c, const region_t *clip) {

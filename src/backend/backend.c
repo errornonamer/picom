@@ -97,7 +97,7 @@ static void process_window_for_painting(session_t *ps, struct managed_win* w, vo
 	    ps->backend_data, IMAGE_OP_APPLY_ALPHA, new_img, &reg_frame,
 	    &reg_visible_local, (double[]){w->frame_opacity});
 	pixman_region32_fini(&reg_frame);
-	ps->backend_data->ops->compose(ps->backend_data, new_img,
+	ps->backend_data->ops->compose(ps->backend_data, w, new_img,
 				       w->g.x, w->g.y,
 				       w->g.x + w->widthb, w->g.y + w->heightb,
 				       reg_paint_in_bound, reg_visible);
@@ -389,7 +389,7 @@ void paint_all_new(session_t *ps, struct managed_win *t, bool ignore_damage) {
 					w->g.x + w->shadow_dx, w->g.y + w->shadow_dy, 
 			    	w->g.x + w->shadow_dx + w->shadow_width,
 			    	w->g.y + w->shadow_dy + w->shadow_height,
-					reg_shadow, &reg_visible);
+					&reg_shadow, &reg_visible);
 			}
 
 			pixman_region32_fini(&reg_shadow);
