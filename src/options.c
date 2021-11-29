@@ -75,7 +75,43 @@ static void usage(const char *argv0, int ret) {
 	    "  Run animations for window geometry changes (movement and scaling).\n"
 	    "\n"
 	    "--animation-for-open-window\n"
-	    "  Which animation to run when opening a window. Must be one of `none`, `fly-in` (default: none).\n"
+	    "  Which animation to run when opening a window.\n"
+	    "  Must be one of `none`, `fly-in`, `zoom`,\n"
+	    "  `slide-down`, `slide-up`, `slide-left`, `slide-right`\n"
+	    "  (default: none).\n"
+	    "\n"
+	    "--animation-for-transient-window\n"
+	    "  Which animation to run when opening a transient window.\n"
+	    "  Must be one of `none`, `fly-in`, `zoom`,\n"
+	    "  `slide-down`, `slide-up`, `slide-left`, `slide-right`\n"
+	    "  (default: none).\n"
+	    "\n"
+	    "--animation-for-unmap-window\n"
+	    "  Which animation to run when hiding (e.g. minimize) a window.\n"
+	    "  Must be one of `auto`, `none`, `fly-in`, `zoom`,\n"
+	    "  `slide-down`, `slide-up`, `slide-left`, `slide-right`\n"
+	    "  `slide-in`, `slide-out`\n"
+	    "  (default: auto).\n"
+	    "\n"
+	    "--animation-for-workspace-switch-in\n"
+	    "  Which animation to run on switching workspace for windows\n"
+	    "  comming into view.\n"
+	    "  IMPORTANT: window manager must set _NET_CURRENT_DESKTOP\n"
+	    "  before doing the hide/show of windows\n"
+	    "  Must be one of `auto`, `none`, `fly-in`, `zoom`,\n"
+	    "  `slide-down`, `slide-up`, `slide-left`, `slide-right`\n"
+	    "  `slide-in`, `slide-out`\n"
+	    "  (default: auto).\n"
+	    "\n"
+	    "--animation-for-workspace-switch-out\n"
+	    "  Which animation to run on switching workspace for windows\n"
+	    "  going out of view.\n"
+	    "  IMPORTANT: window manager must set _NET_CURRENT_DESKTOP\n"
+	    "  before doing the hide/show of windows\n"
+	    "  Must be one of `auto`, `none`, `fly-in`, `zoom`,\n"
+	    "  `slide-down`, `slide-up`, `slide-left`, `slide-right`\n"
+	    "  `slide-in`, `slide-out`\n"
+	    "  (default: auto).\n"
 	    "\n"
 	    "--animation-stiffness\n"
 	    "  Stiffness (a.k.a. tension) parameter for animation (default: 200.0).\n"
@@ -85,6 +121,13 @@ static void usage(const char *argv0, int ret) {
 	    "\n"
 	    "--animation-window-mass\n"
 	    "  Mass parameter for animation (default: 1.0).\n"
+	    "\n"
+	    "--animation-delta\n"
+	    "  The time between steps in animation, in milliseconds. (> 0, defaults to 10).\n"
+	    "\n"
+	    "--animation-force-steps\n"
+	    "  Force animations to go step by step even if cpu usage is high \n"
+	    "  (default: false)\n"
 	    "\n"
 	    "--animation-clamping\n"
 	    "  Whether to clamp animations (default: true)\n"
@@ -493,6 +536,7 @@ static const struct option longopts[] = {
     {"animation-window-mass", required_argument, NULL, 807},
     {"animation-clamping", no_argument, NULL, 808},
     {"animation-for-open-window", required_argument, NULL, 809},
+    {"animation-for-transient-window", required_argument, NULL, 810},
     // Must terminate with a NULL entry
     {NULL, 0, NULL, 0},
 };
@@ -949,6 +993,16 @@ bool get_cfg(options_t *opt, int argc, char *const *argv, bool shadow_enable,
 				log_warn("Invalid open-window animation %s, ignoring.", optarg);
 			} else {
 				opt->animation_for_open_window = animation;
+			}
+			break;
+		}
+		case 810: {
+			// --animation-for-transient-window
+			enum open_window_animation animation = parse_open_window_animation(optarg);
+			if (animation >= OPEN_WINDOW_ANIMATION_INVALID) {
+				log_warn("Invalid transient-window animation %s, ignoring.", optarg);
+			} else {
+				opt->animation_for_transient_window = animation;
 			}
 			break;
 		}

@@ -282,6 +282,8 @@ static inline void parse_wintype_config(const config_t *cfg, const char *member_
 	free(str);
 
 	int ival = 0;
+	const char *sval = NULL;
+
 	if (setting) {
 		if (config_setting_lookup_bool(setting, "shadow", &ival)) {
 			o->shadow = ival;
@@ -310,6 +312,38 @@ static inline void parse_wintype_config(const config_t *cfg, const char *member_
 		if (config_setting_lookup_bool(setting, "clip-shadow-above", &ival)) {
 			o->clip_shadow_above = ival;
 			mask->clip_shadow_above = true;
+		}
+		if (config_setting_lookup_string(setting, "animation", &sval)) {
+			enum open_window_animation animation = parse_open_window_animation(sval);
+			if (animation >= OPEN_WINDOW_ANIMATION_INVALID)
+				animation = OPEN_WINDOW_ANIMATION_NONE;
+
+			o->animation = animation;
+			mask->animation = OPEN_WINDOW_ANIMATION_INVALID;
+		}
+		if (config_setting_lookup_string(setting, "animation-unmap", &sval)) {
+			enum open_window_animation animation = parse_open_window_animation(sval);
+			if (animation >= OPEN_WINDOW_ANIMATION_INVALID)
+				animation = OPEN_WINDOW_ANIMATION_NONE;
+
+			o->animation_unmap = animation;
+			mask->animation_unmap = OPEN_WINDOW_ANIMATION_INVALID;
+		}
+		if (config_setting_lookup_string(setting, "animation-workspace-in", &sval)) {
+			enum open_window_animation animation = parse_open_window_animation(sval);
+			if (animation >= OPEN_WINDOW_ANIMATION_INVALID)
+				animation = OPEN_WINDOW_ANIMATION_NONE;
+
+			o->animation_workspace_in = animation;
+			mask->animation_workspace_in = OPEN_WINDOW_ANIMATION_INVALID;
+		}
+		if (config_setting_lookup_string(setting, "animation-workspace-out", &sval)) {
+			enum open_window_animation animation = parse_open_window_animation(sval);
+			if (animation >= OPEN_WINDOW_ANIMATION_INVALID)
+				animation = OPEN_WINDOW_ANIMATION_NONE;
+
+			o->animation_workspace_out = animation;
+			mask->animation_workspace_out = OPEN_WINDOW_ANIMATION_INVALID;
 		}
 
 		double fval;
@@ -576,12 +610,52 @@ char *parse_config_libconfig(options_t *opt, const char *config_file, bool *shad
 		}
 		opt->animation_for_open_window = animation;
 	}
+	// --animation-for-transient-window
+	if (config_lookup_string(&cfg, "animation-for-transient-window", &sval)) {
+		enum open_window_animation animation = parse_open_window_animation(sval);
+		if (animation >= OPEN_WINDOW_ANIMATION_INVALID) {
+			log_fatal("Invalid transient-window animation %s", sval);
+			goto err;
+		}
+		opt->animation_for_transient_window = animation;
+	}
+	// --animation-for-unmap-window
+	if (config_lookup_string(&cfg, "animation-for-unmap-window", &sval)) {
+		enum open_window_animation animation = parse_open_window_animation(sval);
+		if (animation >= OPEN_WINDOW_ANIMATION_INVALID) {
+			log_fatal("Invalid unmap-window animation %s", sval);
+			goto err;
+		}
+		opt->animation_for_unmap_window = animation;
+	}
+	// --animation-for-workspace-switch-in
+	if (config_lookup_string(&cfg, "animation-for-workspace-switch-in", &sval)) {
+		enum open_window_animation animation = parse_open_window_animation(sval);
+		if (animation >= OPEN_WINDOW_ANIMATION_INVALID) {
+			log_fatal("Invalid workspace-switch-in animation %s", sval);
+			goto err;
+		}
+		opt->animation_for_workspace_switch_in = animation;
+	}
+	// --animation-for-workspace-switch-out
+	if (config_lookup_string(&cfg, "animation-for-workspace-switch-out", &sval)) {
+		enum open_window_animation animation = parse_open_window_animation(sval);
+		if (animation >= OPEN_WINDOW_ANIMATION_INVALID) {
+			log_fatal("Invalid workspace-switch-out animation %s", sval);
+			goto err;
+		}
+		opt->animation_for_workspace_switch_out = animation;
+	}
 	// --animation-stiffness
 	config_lookup_float(&cfg, "animation-stiffness", &opt->animation_stiffness);
 	// --animation-window-mass
 	config_lookup_float(&cfg, "animation-window-mass", &opt->animation_window_mass);
 	// --animation-dampening
 	config_lookup_float(&cfg, "animation-dampening", &opt->animation_dampening);
+	// --animation-delta
+	config_lookup_float(&cfg, "animation-delta", &opt->animation_delta);
+	// --animation-force-steps
+	lcfg_lookup_bool(&cfg, "animation-force-steps", &opt->animation_force_steps);
 	// --animation-clamping
 	lcfg_lookup_bool(&cfg, "animation-clamping", &opt->animation_clamping);
 	// --focus-exclude
