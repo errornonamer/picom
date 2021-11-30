@@ -245,7 +245,6 @@ void paint_all_new(session_t *ps, struct managed_win *t, bool ignore_damage) {
 			                          &reg_paint_in_bound, &reg_visible);
 		}
 
-
 		// Draw shadow on target
 		if (w->shadow) {
 			assert(!(w->flags & WIN_FLAGS_SHADOW_NONE));
@@ -267,6 +266,10 @@ void paint_all_new(session_t *ps, struct managed_win *t, bool ignore_damage) {
 			if (pixman_region32_not_empty(&ps->shadow_exclude_reg)) {
 				pixman_region32_subtract(&reg_shadow, &reg_shadow,
 				                         &ps->shadow_exclude_reg);
+			}
+			if (pixman_region32_not_empty(&reg_shadow_clip)) {
+				pixman_region32_subtract(&reg_shadow, &reg_shadow,
+				                         &reg_shadow_clip);
 			}
 
 			if (ps->o.xinerama_shadow_crop && w->xinerama_scr >= 0 &&
@@ -292,22 +295,25 @@ void paint_all_new(session_t *ps, struct managed_win *t, bool ignore_damage) {
 			assert(w->shadow_image);
 			if (w->opacity == 1) {
 				ps->backend_data->ops->compose(
-				    ps->backend_data, w, w->shadow_image, w->g.x + w->shadow_dx,
-				    w->g.y + w->shadow_dy, &reg_shadow, &reg_visible);
+				    ps->backend_data, w, w->shadow_image,
+					w->g.x + w->shadow_dx, w->g.y + w->shadow_dy,
+			    	w->g.x + w->shadow_dx + w->shadow_width,
+			    	w->g.y + w->shadow_dy + w->shadow_height,
+					&reg_shadow, &reg_visible);
 			} else {
-				auto new_img = ps->backend_data->ops->copy(
-				    ps->backend_data, w->shadow_image, &reg_visible);
-				ps->backend_data->ops->image_op(
-				    ps->backend_data, IMAGE_OP_APPLY_ALPHA_ALL, new_img,
-				    NULL, &reg_shadow, (double[]){w->opacity});
+				ps->backend_data->ops->set_image_property(
+			    	ps->backend_data, IMAGE_PROPERTY_OPACITY, w->shadow_image,
+			    	&w->opacity);
 				ps->backend_data->ops->compose(
-				    ps->backend_data, w, new_img, w->g.x + w->shadow_dx,
-				    w->g.y + w->shadow_dy, &reg_shadow, &reg_visible);
-				ps->backend_data->ops->release_image(ps->backend_data, new_img);
+				    ps->backend_data, w, w->shadow_image,
+					w->g.x + w->shadow_dx, w->g.y + w->shadow_dy, 
+			    	w->g.x + w->shadow_dx + w->shadow_width,
+			    	w->g.y + w->shadow_dy + w->shadow_height,
+					&reg_shadow, &reg_visible);
 			}
+
 			pixman_region32_fini(&reg_shadow);
 		}
-
 
 		// Store the window background for rounded corners
 		// If rounded corners backup the region first
@@ -395,69 +401,6 @@ void paint_all_new(session_t *ps, struct managed_win *t, bool ignore_damage) {
 			}
 		}
 
-		// Draw shadow on target
-		if (w->shadow) {
-			assert(!(w->flags & WIN_FLAGS_SHADOW_NONE));
-			// Clip region for the shadow
-			// reg_shadow \in reg_paint
-			auto reg_shadow = win_extents_by_val(w);
-			pixman_region32_intersect(&reg_shadow, &reg_shadow, &reg_paint);
-			if (!ps->o.wintype_option[w->window_type].full_shadow) {
-				pixman_region32_subtract(&reg_shadow, &reg_shadow, &reg_bound);
-			}
-
-			// Mask out the region we don't want shadow on
-			if (pixman_region32_not_empty(&ps->shadow_exclude_reg)) {
-				pixman_region32_subtract(&reg_shadow, &reg_shadow,
-				                         &ps->shadow_exclude_reg);
-			}
-			if (pixman_region32_not_empty(&reg_shadow_clip)) {
-				pixman_region32_subtract(&reg_shadow, &reg_shadow,
-				                         &reg_shadow_clip);
-			}
-
-			if (ps->o.xinerama_shadow_crop && w->xinerama_scr >= 0 &&
-			    w->xinerama_scr < ps->xinerama_nscrs) {
-				// There can be a window where number of screens is
-				// updated, but the screen number attached to the windows
-				// have not.
-				//
-				// Window screen number will be updated eventually, so
-				// here we just check to make sure we don't access out of
-				// bounds.
-				pixman_region32_intersect(
-				    &reg_shadow, &reg_shadow,
-				    &ps->xinerama_scr_regs[w->xinerama_scr]);
-			}
-
-			if (ps->o.transparent_clipping) {
-				// ref: <transparent-clipping-note>
-				pixman_region32_intersect(&reg_shadow, &reg_shadow,
-				                          &reg_visible);
-			}
-
-			assert(w->shadow_image);
-			if (w->opacity == 1) {
-				ps->backend_data->ops->compose(
-				    ps->backend_data, w, w->shadow_image,
-					w->g.x + w->shadow_dx, w->g.y + w->shadow_dy,
-			    	w->g.x + w->shadow_dx + w->shadow_width,
-			    	w->g.y + w->shadow_dy + w->shadow_height,
-					&reg_shadow, &reg_visible);
-			} else {
-				ps->backend_data->ops->set_image_property(
-			    	ps->backend_data, IMAGE_PROPERTY_OPACITY, w->shadow_image,
-			    	&w->opacity);
-				ps->backend_data->ops->compose(
-				    ps->backend_data, w, w->shadow_image,
-					w->g.x + w->shadow_dx, w->g.y + w->shadow_dy, 
-			    	w->g.x + w->shadow_dx + w->shadow_width,
-			    	w->g.y + w->shadow_dy + w->shadow_height,
-					&reg_shadow, &reg_visible);
-			}
-
-			pixman_region32_fini(&reg_shadow);
-		}
 
 		// Update image properties
 		{
