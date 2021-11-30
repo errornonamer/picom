@@ -22,6 +22,10 @@ https://user-images.githubusercontent.com/77824120/143892481-c1be9ac9-44e0-4d1a-
 
 ## How to install
 
+### Arch Build System
+
+Clone this repo and run `makepkg -sri`
+
 ### Build from source
 
 Clone this repo and follow the [build instructions of the official picom README](https://github.com/yshui/picom/blob/next/README.md#build)
