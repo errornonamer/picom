@@ -24,7 +24,7 @@ https://user-images.githubusercontent.com/77824120/143892481-c1be9ac9-44e0-4d1a-
 
 ### Arch Build System
 
-Clone this repo and run `makepkg -sri`
+Download [PKGBUILD](https://raw.githubusercontent.com/errornonamer/picom/next-rebase/PKGBUILD) and run `makepkg -sri`
 
 ### Build from source
 
