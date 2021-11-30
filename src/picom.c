@@ -580,14 +580,6 @@ static void configure_root(session_t *ps) {
 	ps->root_width = r->width;
 	ps->root_height = r->height;
 
-	auto prop = x_get_prop(ps->c, ps->root, ps->atoms->a_NET_CURRENT_DESKTOP,
-					1L, XCB_ATOM_CARDINAL, 32);
-
-	ps->root_desktop_switch_direction = 0;
-	if (prop.nitems) {
-		ps->root_desktop_num = (int)*prop.c32;
-	}
-
 	rebuild_screen_reg(ps);
 	rebuild_shadow_exclude_reg(ps);
 
@@ -666,105 +658,71 @@ paint_preprocess(session_t *ps, bool *fade_running, bool *animation_running) {
 	*animation_running = false;
 	auto now = get_time_ms();
 
-	// Fading step calculation
-	long steps = 0L;
-	if (ps->fade_time) {
-		assert(now >= ps->fade_time);
-		steps = (now - ps->fade_time) / ps->o.fade_delta;
-	} else {
-		// Reset fade_time if unset
-		ps->fade_time = now;
-		steps = 0L;
-	}
-	ps->fade_time += steps * ps->o.fade_delta;
-
-	double animation_delta = 0;
+	// IMPORTANT: These window animation steps must happen before any other
+	//            [pre]processing. This is because it changes the window's geometry.
 	if (ps->o.animations) {
 		if (!ps->animation_time)
 			ps->animation_time = now;
+		double delta_secs = (double)(now - ps->animation_time) / 1000;
+		win_stack_foreach_managed_safe(w, &ps->window_stack) {
+			// Only animate mapped windows
+			if (!win_is_mapped_in_x(w))
+				continue;
 
-		animation_delta = (double)(now - ps->animation_time) /
-			(ps->o.animation_delta*100);
-
-		if (ps->o.animation_force_steps)
-			animation_delta = min2(animation_delta, ps->o.animation_delta/1000);
-	}
-
-	// First, let's process fading
-	win_stack_foreach_managed_safe(w, &ps->window_stack) {
-		const winmode_t mode_old = w->mode;
-		const bool was_painted = w->to_paint;
-		const double opacity_old = w->opacity;
-
-		// IMPORTANT: These window animation steps must happen before any other
-		// [pre]processing. This is because it changes the window's geometry.
-		if (ps->o.animations &&
-			!isnan(w->animation_progress) && w->animation_progress != 1.0 &&
-			ps->o.wintype_option[w->window_type].animation != 0 &&
-			win_is_mapped_in_x(w))
-		{
 			double neg_displacement_x =
-				w->animation_dest_center_x - w->animation_center_x;
+			    w->animation_dest_center_x - w->animation_center_x;
 			double neg_displacement_y =
-				w->animation_dest_center_y - w->animation_center_y;
+			    w->animation_dest_center_y - w->animation_center_y;
 			double neg_displacement_w = w->animation_dest_w - w->animation_w;
 			double neg_displacement_h = w->animation_dest_h - w->animation_h;
 			double acceleration_x =
-				(ps->o.animation_stiffness * neg_displacement_x -
-					ps->o.animation_dampening * w->animation_velocity_x) /
-				ps->o.animation_window_mass;
+			    (ps->o.animation_stiffness * neg_displacement_x -
+			     ps->o.animation_dampening * w->animation_velocity_x) /
+			    ps->o.animation_window_mass;
 			double acceleration_y =
-				(ps->o.animation_stiffness * neg_displacement_y -
-					ps->o.animation_dampening * w->animation_velocity_y) /
-				ps->o.animation_window_mass;
+			    (ps->o.animation_stiffness * neg_displacement_y -
+			     ps->o.animation_dampening * w->animation_velocity_y) /
+			    ps->o.animation_window_mass;
 			double acceleration_w =
-				(ps->o.animation_stiffness * neg_displacement_w -
-					ps->o.animation_dampening * w->animation_velocity_w) /
-				ps->o.animation_window_mass;
+			    (ps->o.animation_stiffness * neg_displacement_w -
+			     ps->o.animation_dampening * w->animation_velocity_w) /
+			    ps->o.animation_window_mass;
 			double acceleration_h =
-				(ps->o.animation_stiffness * neg_displacement_h -
-					ps->o.animation_dampening * w->animation_velocity_h) /
-				ps->o.animation_window_mass;
-			w->animation_velocity_x += acceleration_x * animation_delta;
-			w->animation_velocity_y += acceleration_y * animation_delta;
-			w->animation_velocity_w += acceleration_w * animation_delta;
-			w->animation_velocity_h += acceleration_h * animation_delta;
+			    (ps->o.animation_stiffness * neg_displacement_h -
+			     ps->o.animation_dampening * w->animation_velocity_h) /
+			    ps->o.animation_window_mass;
+			w->animation_velocity_x += acceleration_x * delta_secs;
+			w->animation_velocity_y += acceleration_y * delta_secs;
+			w->animation_velocity_w += acceleration_w * delta_secs;
+			w->animation_velocity_h += acceleration_h * delta_secs;
 
 			// Animate window geometry
 			double new_animation_x =
-				w->animation_center_x + w->animation_velocity_x * animation_delta;
+			    w->animation_center_x + w->animation_velocity_x * delta_secs;
 			double new_animation_y =
-				w->animation_center_y + w->animation_velocity_y * animation_delta;
+			    w->animation_center_y + w->animation_velocity_y * delta_secs;
 			double new_animation_w =
-				w->animation_w + w->animation_velocity_w * animation_delta;
+			    w->animation_w + w->animation_velocity_w * delta_secs;
 			double new_animation_h =
-				w->animation_h + w->animation_velocity_h * animation_delta;
-
-			// Negative new width/height causes segfault and it can happen
-			// when clamping disabled and shading a window
-			if (new_animation_h < 0)
-				new_animation_h = 0;
-
-			if (new_animation_w < 0)
-				new_animation_w = 0;
+			    w->animation_h + w->animation_velocity_h * delta_secs;
 
 			if (ps->o.animation_clamping) {
 				w->animation_center_x = clamp(
-					new_animation_x,
-					min2(w->animation_center_x, w->animation_dest_center_x),
-					max2(w->animation_center_x, w->animation_dest_center_x));
+				    new_animation_x,
+				    min2(w->animation_center_x, w->animation_dest_center_x),
+				    max2(w->animation_center_x, w->animation_dest_center_x));
 				w->animation_center_y = clamp(
-					new_animation_y,
-					min2(w->animation_center_y, w->animation_dest_center_y),
-					max2(w->animation_center_y, w->animation_dest_center_y));
+				    new_animation_y,
+				    min2(w->animation_center_y, w->animation_dest_center_y),
+				    max2(w->animation_center_y, w->animation_dest_center_y));
 				w->animation_w =
-					clamp(new_animation_w,
-							min2(w->animation_w, w->animation_dest_w),
-							max2(w->animation_w, w->animation_dest_w));
+				    clamp(new_animation_w,
+				          min2(w->animation_w, w->animation_dest_w),
+				          max2(w->animation_w, w->animation_dest_w));
 				w->animation_h =
-					clamp(new_animation_h,
-							min2(w->animation_h, w->animation_dest_h),
-				 			max2(w->animation_h, w->animation_dest_h));
+				    clamp(new_animation_h,
+				          min2(w->animation_h, w->animation_dest_h),
+				          max2(w->animation_h, w->animation_dest_h));
 			} else {
 				w->animation_center_x = new_animation_x;
 				w->animation_center_y = new_animation_y;
@@ -776,134 +734,103 @@ paint_preprocess(session_t *ps, bool *fade_running, bool *animation_running) {
 			// changes (if there are any).
 
 			struct win_geometry old_g = w->g;
-			double old_animation_progress = w->animation_progress;
-			new_animation_x = round(w->animation_center_x - w->animation_w * 0.5);
-			new_animation_y = round(w->animation_center_y - w->animation_h * 0.5);
-			new_animation_w = round(w->animation_w);
-			new_animation_h = round(w->animation_h);
+			w->g.x = (int16_t)round(w->animation_center_x - w->animation_w * 0.5);
+			w->g.y = (int16_t)round(w->animation_center_y - w->animation_h * 0.5);
+			w->g.width = (uint16_t)round(w->animation_w);
+			w->g.height = (uint16_t)round(w->animation_h);
 
-			bool position_changed =
-				new_animation_x != old_g.x || new_animation_y != old_g.y;
+			bool position_changed = w->g.x != old_g.x || w->g.y != old_g.y;
 			bool size_changed =
-				new_animation_w != old_g.width || new_animation_h != old_g.height;
+			    w->g.width != old_g.width || w->g.height != old_g.height;
 			bool geometry_changed = position_changed || size_changed;
 
 			// Mark past window region with damage
-			if (was_painted && geometry_changed)
+			if (w->to_paint && geometry_changed)
 				add_damage_from_win(ps, w);
-
-			double x_dist = w->animation_dest_center_x - w->animation_center_x;
-			double y_dist = w->animation_dest_center_y - w->animation_center_y;
-			double w_dist = w->animation_dest_w - w->animation_w;
-			double h_dist = w->animation_dest_h - w->animation_h;
-			w->animation_progress =
-				1.0 - w->animation_inv_og_distance *
-					sqrt(x_dist * x_dist + y_dist * y_dist +
-							w_dist * w_dist + h_dist * h_dist);
-
-			// When clamping disabled we don't want the overlayed image to
-			// fade in again because process is moving to negative value
-			if (w->animation_progress < old_animation_progress)
-				w->animation_progress = old_animation_progress;
-
-			w->g.x = (int16_t)new_animation_x;
-			w->g.y = (int16_t)new_animation_y;
-			w->g.width = (uint16_t)new_animation_w;
-			w->g.height = (uint16_t)new_animation_h;
 
 			// Submit window size change
 			if (size_changed) {
 				win_on_win_size_change(ps, w);
-				win_update_bounding_shape(ps, w);
 
-				if (w->state != WSTATE_DESTROYING)
-					win_clear_flags(w, WIN_FLAGS_PIXMAP_STALE);
+				pixman_region32_clear(&w->bounding_shape);
+				pixman_region32_fini(&w->bounding_shape);
+				pixman_region32_init_rect(&w->bounding_shape, 0, 0,
+				                          (uint)w->widthb, (uint)w->heightb);
 
+				win_clear_flags(w, WIN_FLAGS_PIXMAP_STALE);
 				win_process_image_flags(ps, w);
 			}
 			// Mark new window region with damage
-			if (was_painted && geometry_changed) {
+			if (w->to_paint && geometry_changed)
 				add_damage_from_win(ps, w);
-				w->reg_ignore_valid = false;
-			}
 
-			// We can't check for 1 here as sometimes 1 = 0.999999999999999
-			// in case of floating numbers
-			if (w->animation_progress >= 0.999999999) {
-				w->animation_progress = 1;
-				w->animation_velocity_x = 0.0;
-				w->animation_velocity_y = 0.0;
-				w->animation_velocity_w = 0.0;
-				w->animation_velocity_h = 0.0;
-			}
-
-			if (!ps->root_desktop_switch_direction) {
-				if (w->state == WSTATE_UNMAPPING || w->state == WSTATE_DESTROYING) {
-					steps = 0;
-					double new_opacity = clamp(
-									w->opacity_target_old-w->animation_progress,
-									w->opacity_target, 1);
-
-					if (new_opacity < w->opacity)
-						w->opacity = new_opacity;
-
-				} else if (w->state == WSTATE_MAPPING) {
-					steps = 0;
-					double new_opacity = clamp(
-										w->animation_progress,
-										0.0, w->opacity_target);
-
-					if (new_opacity > w->opacity)
-						w->opacity = new_opacity;
-				}
-			}
-
+			double x_dist = w->animation_dest_center_x - w->animation_center_x;
+			double y_dist = w->animation_dest_center_y - w->animation_center_y;
+			w->animation_progress =
+			    1.0 - w->animation_inv_og_distance *
+			              sqrt(x_dist * x_dist + y_dist * y_dist);
 			*animation_running = true;
 		}
+		// Okay, now we can continue on to the rest of the [pre]processing.
+		ps->animation_time = now;
+	}
+
+	// Fading step calculation
+	long steps = 0L;
+	if (ps->fade_time) {
+		assert(now >= ps->fade_time);
+		steps = (now - ps->fade_time) / ps->o.fade_delta;
+	} else {
+		// Reset fade_time if unset
+		ps->fade_time = get_time_ms();
+		steps = 0L;
+	}
+	ps->fade_time += steps * ps->o.fade_delta;
+
+	// First, let's process fading
+	win_stack_foreach_managed_safe(w, &ps->window_stack) {
+		const winmode_t mode_old = w->mode;
+		const bool was_painted = w->to_paint;
+		const double opacity_old = w->opacity;
 
 		if (win_should_dim(ps, w) != w->dim) {
 			w->dim = win_should_dim(ps, w);
 			add_damage_from_win(ps, w);
 		}
 
-		if (w->opacity != w->opacity_target) {
-			// Run fading
-			if (run_fade(ps, &w, steps)) {
-				*fade_running = true;
-			}
+		// Run fading
+		if (run_fade(ps, &w, steps)) {
+			*fade_running = true;
+		}
 
-			// Add window to damaged area if its opacity changes
-			// If was_painted == false, and to_paint is also false, we don't care
-			// If was_painted == false, but to_paint is true, damage will be added in
-			// the loop below
-			if (was_painted && w->opacity != opacity_old) {
-				add_damage_from_win(ps, w);
-			}
+		// Add window to damaged area if its opacity changes
+		// If was_painted == false, and to_paint is also false, we don't care
+		// If was_painted == false, but to_paint is true, damage will be added in
+		// the loop below
+		if (was_painted && w->opacity != opacity_old) {
+			add_damage_from_win(ps, w);
+		}
 
-			if (win_check_fade_finished(ps, w)) {
-				// the window has been destroyed because fading finished
-				continue;
-			}
+		if (win_check_fade_finished(ps, w)) {
+			// the window has been destroyed because fading finished
+			continue;
+		}
 
-			if (win_has_frame(w)) {
-				w->frame_opacity = ps->o.frame_opacity;
-			} else {
-				w->frame_opacity = 1.0;
-			}
+		if (win_has_frame(w)) {
+			w->frame_opacity = ps->o.frame_opacity;
+		} else {
+			w->frame_opacity = 1.0;
+		}
 
-			// Update window mode
-			w->mode = win_calc_mode(ps, w);
+		// Update window mode
+		w->mode = win_calc_mode(ps, w);
 
-			// Destroy all reg_ignore above when frame opaque state changes on
-			// SOLID mode
-			if (was_painted && w->mode != mode_old) {
-				w->reg_ignore_valid = false;
-			}
+		// Destroy all reg_ignore above when frame opaque state changes on
+		// SOLID mode
+		if (was_painted && w->mode != mode_old) {
+			w->reg_ignore_valid = false;
 		}
 	}
-
-	if (*animation_running)
-		ps->animation_time = now;
 
 	// Opacity will not change, from now on.
 	rc_region_t *last_reg_ignore = rc_region_new();
@@ -931,10 +858,7 @@ paint_preprocess(session_t *ps, bool *fade_running, bool *animation_running) {
 		if (w->state == WSTATE_UNMAPPED ||
 		    unlikely(w->base.id == ps->debug_window ||
 		             w->client_win == ps->debug_window)) {
-
-			if (!*fade_running || w->opacity == w->opacity_target)
-				to_paint = false;
-
+			to_paint = false;
 		} else if (!w->ever_damaged && w->state != WSTATE_UNMAPPING &&
 		           w->state != WSTATE_DESTROYING) {
 			// Unmapping clears w->ever_damaged, but the fact that the window
@@ -1786,7 +1710,6 @@ static void draw_callback_impl(EV_P_ session_t *ps, int revents attr_unused) {
 	}
 	if (!animation_running) {
 		ps->animation_time = 0L;
-		ps->root_desktop_switch_direction = 0;
 	}
 
 	// TODO(yshui) Investigate how big the X critical section needs to be. There are
