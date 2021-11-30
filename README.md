@@ -20,11 +20,6 @@ https://user-images.githubusercontent.com/77824120/143892481-c1be9ac9-44e0-4d1a-
 
 - Window animations code from [dccsillag](https://github.com/dccsillag/picom/tree/implement-window-animations)
 
-## Known issues
-
-- xrandr backend is broken (low performance, no rounded corners)
-- high CPU usage
-
 ## How to install
 
 ### Build from source
